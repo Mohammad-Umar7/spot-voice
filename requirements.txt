@@ -1,0 +1,34 @@
+# spot-voice runtime dependencies. Python 3.11 or 3.12 on Windows 11.
+#
+# Install with:  pip install -r requirements.txt
+# Mock mode at a desk only needs the "voice" and "core" groups — the bosdyn
+# packages are imported lazily and are not touched when MOCK_ROBOT=true.
+
+# --- Robot (official Boston Dynamics SDK) -----------------------------------
+bosdyn-client>=4.1,<5
+bosdyn-api>=4.1,<5
+bosdyn-core>=4.1,<5
+
+# --- Claude (direct Anthropic Messages API; no MCP anywhere) ----------------
+anthropic>=0.40
+
+# --- Voice in: capture, VAD, local speech-to-text ---------------------------
+sounddevice>=0.4.6
+webrtcvad-wheels>=2.0.14   # prebuilt WebRTC VAD; the program falls back to an
+                           # energy gate if this is unavailable
+faster-whisper>=1.0.0
+
+# --- Voice out --------------------------------------------------------------
+edge-tts>=6.1.9            # online TTS; sends reply text to Microsoft servers
+pyttsx3>=2.90              # offline TTS (Windows SAPI5); no data leaves the PC
+miniaudio>=1.59            # decodes edge-tts MP3 to WAV without an ffmpeg binary
+simpleaudio>=1.0.4         # laptop playback; winsound is used if this is absent
+
+# --- Vision (follow-me) -----------------------------------------------------
+ultralytics>=8.1.0         # YOLOv8n person detection, CPU is fine
+opencv-python>=4.8.0
+numpy>=1.24
+
+# --- Core -------------------------------------------------------------------
+python-dotenv>=1.0.0
+rich>=13.0.0
