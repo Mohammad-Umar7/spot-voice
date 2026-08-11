@@ -251,6 +251,19 @@ class SpotClient(RobotInterface):
                 time.sleep(0.25)
             raise SpotVoiceError("Spot didn't power on. Check the battery and the tablet.")
 
+    def power_on(self) -> ActionResult:
+        """Turn motor power on and leave the posture alone.
+
+        Standing is a separate step. Powering on is what fails when the e-stop
+        is asserted or the battery is flat, so it is worth being able to do it
+        -- and hear about it -- on its own.
+        """
+        try:
+            self._call("power on", self._power_on_if_needed)
+        except Exception as exc:
+            return fail(to_speakable(exc))
+        return ok("Motors are on.")
+
     def stand(self) -> ActionResult:
         from bosdyn.client.robot_command import blocking_stand
 

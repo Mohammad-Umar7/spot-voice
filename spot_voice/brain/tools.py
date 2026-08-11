@@ -29,6 +29,16 @@ CAMERAS = ["front", "left", "right"]
 
 TOOLS: list[dict[str, Any]] = [
     {
+        "name": "power_on",
+        "description": (
+            "Turn the motors on without changing posture. You rarely need this "
+            "on its own -- stand, move, navigate_to, dock and undock all power "
+            "the motors themselves. Use it when the operator explicitly asks to "
+            "power on, or to check whether powering on is what is failing."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
         "name": "stand",
         "description": (
             "Power on the motors if needed and stand up. Use before any movement. "

@@ -121,11 +121,21 @@ class VoiceApp:
 
     # ------------------------------------------------------------------
 
-    def start(self, with_microphone: bool = True) -> None:
-        """Connect to the robot, build the brain and (optionally) open the mic."""
-        self.robot.connect()
+    def start(self, with_microphone: bool = True, with_brain: bool = True) -> None:
+        """Connect to the robot, build the brain and (optionally) open the mic.
 
-        if self.config.brain_enabled:
+        Args:
+            with_microphone: Open the mic and load the speech model.
+            with_brain: Build the Anthropic client. Manual mode passes ``False``
+                so bring-up needs nothing but the robot.
+        """
+        self.robot.connect()
+        self.report_robot_state()
+
+        if not with_brain:
+            # Manual mode. Deliberately no brain; run_manual_mode says so.
+            pass
+        elif self.config.brain_enabled:
             try:
                 from .brain.agent import Brain
 
@@ -164,6 +174,64 @@ class VoiceApp:
                 console=self.console,
             )
             self.listener.start()
+
+    def report_robot_state(self) -> None:
+        """Print what the robot is doing right now, and anything blocking motion.
+
+        Printed once after connecting. Without it you are talking to a robot
+        whose posture, power and e-stop state you cannot see -- which is the
+        difference between "say stand and it works" and "say stand and wonder".
+        """
+        result = self.robot.get_status()
+        if not result.ok or not result.data:
+            self.console.print(f"[red]Could not read robot state: {result.message}[/red]")
+            return
+
+        state = result.data
+        table = Table.grid(padding=(0, 2))
+        table.add_column(style="dim")
+        table.add_column()
+        for key in (
+            "battery_percent",
+            "motor_power",
+            "posture",
+            "docked",
+            "estop",
+            "lease",
+            "localization",
+            "location",
+        ):
+            if key in state and state[key] is not None:
+                table.add_row(key.replace("_", " "), str(state[key]))
+        self.console.print(Panel(table, title="robot state", border_style="green"))
+
+        # Anything that would make "stand" fail, said plainly and in the order
+        # you would have to fix it.
+        blockers: list[str] = []
+        if str(state.get("estop", "")).startswith("asserted"):
+            blockers.append(
+                "E-stop is asserted. Release it on the tablet before anything can move."
+            )
+        if state.get("lease") == "not held":
+            blockers.append("I don't hold the lease. Close the tablet app and restart me.")
+        if state.get("docked"):
+            blockers.append("Spot is on the dock. Say 'undock' before asking it to stand.")
+        battery = state.get("battery_percent")
+        if isinstance(battery, (int, float)) and battery < 20:
+            blockers.append(f"Battery is at {battery:.0f} percent. Dock it before a walk.")
+
+        if blockers:
+            for line in blockers:
+                self.console.print(f"[yellow]![/yellow] {line}")
+        elif state.get("posture") == "sitting" or state.get("motor_power") == "off":
+            self.console.print(
+                "[green]Ready.[/green] Spot is sitting with motors off. "
+                "Say [bold]\"stand up\"[/bold] -- that powers the motors and stands it "
+                "in one step."
+            )
+        else:
+            self.console.print("[green]Ready.[/green] Spot is standing.")
+        self.console.print()
 
     def _map_context(self) -> str | None:
         """Stable, site-specific text appended to the system prompt.
@@ -248,6 +316,131 @@ class VoiceApp:
         except Exception:
             LOGGER.debug("robot shutdown failed", exc_info=True)
         self.console.print("[bold]Done.[/bold]")
+
+
+# ----------------------------------------------------------------------
+# Manual mode
+# ----------------------------------------------------------------------
+
+#: Bare commands with no arguments.
+_MANUAL_ALIASES: dict[str, str] = {
+    "power": "power_on",
+    "poweron": "power_on",
+    "power_on": "power_on",
+    "stand": "stand",
+    "up": "stand",
+    "sit": "sit",
+    "down": "sit",
+    "stop": "stop_all",
+    "halt": "stop_all",
+    "status": "get_status",
+    "state": "get_status",
+    "waypoints": "list_waypoints",
+    "places": "list_waypoints",
+    "dock": "dock",
+    "undock": "undock",
+    "follow": "start_follow",
+    "unfollow": "stop_follow",
+}
+
+MANUAL_HELP = """\
+  stand | up            power the motors and stand up
+  sit | down            sit down
+  stop | halt           cancel everything, safe stop
+  status                battery, motor power, e-stop, dock, localization
+  move <dir> [amount]   move forward 1.5 | move turn_left 90
+  go <waypoint>         navigate to a named place
+  look [front|left|right]   take a photo
+  waypoints             list the places on the map
+  undock | dock         leave or return to the charger
+  follow | unfollow     follow-me
+  say <text>            speak through the speaker
+  help                  this list
+  quit                  exit\
+"""
+
+
+def parse_manual_command(line: str) -> tuple[str, dict[str, Any]] | None:
+    """Map a typed operator command to a ``(tool_name, arguments)`` pair.
+
+    Returns ``None`` when the line is not a command this mode understands.
+    """
+    tokens = (line or "").strip().split()
+    if not tokens:
+        return None
+    head = tokens[0].lower()
+    rest = tokens[1:]
+
+    if head in _MANUAL_ALIASES:
+        return _MANUAL_ALIASES[head], {}
+
+    if head in {"look", "photo", "picture"}:
+        camera = rest[0].lower() if rest else "front"
+        return "capture_image", {"camera": camera}
+
+    if head == "say":
+        return "speak", {"text": " ".join(rest)}
+
+    if head in {"go", "goto", "navigate"}:
+        return "navigate_to", {"waypoint_name": " ".join(rest)}
+
+    if head == "move":
+        if not rest:
+            return None
+        direction = rest[0].lower()
+        arguments: dict[str, Any] = {"direction": direction}
+        if len(rest) > 1:
+            try:
+                amount = float(rest[1])
+            except ValueError:
+                return None
+            # A turn is measured in degrees, everything else in metres.
+            key = "degrees" if direction.startswith("turn") else "distance_m"
+            arguments[key] = amount
+        return "move", arguments
+
+    return None
+
+
+def run_manual_mode(app: "VoiceApp", console: Console) -> None:
+    """Drive the robot by typing tool commands, with Claude out of the loop.
+
+    This exists for robot bring-up. Stages 2 and 3 of the rollout are exactly
+    when you are standing a real robot for the first time over a tether that may
+    not be up yet, and "stand" is not a reflex word -- so without this you would
+    need a working Anthropic connection to stand the robot. This path needs
+    nothing but the robot.
+    """
+    console.print(
+        "[bold]Manual mode.[/bold] Commands go straight to the robot -- "
+        "no speech, no Claude, no internet needed.\n"
+    )
+    console.print(f"[dim]{MANUAL_HELP}[/dim]\n")
+
+    while True:
+        try:
+            line = input("robot> ").strip()
+        except EOFError:
+            return
+        if not line:
+            continue
+        if line.lower() in {"quit", "exit", "q"}:
+            return
+        if line.lower() in {"help", "?"}:
+            console.print(f"[dim]{MANUAL_HELP}[/dim]")
+            continue
+
+        parsed = parse_manual_command(line)
+        if parsed is None:
+            console.print(
+                f"[yellow]Don't know '{line}'. Type 'help' for the list.[/yellow]"
+            )
+            continue
+
+        name, arguments = parsed
+        result = app.dispatcher.dispatch(name, arguments)
+        if result.payload.get("waypoints"):
+            console.print("  " + ", ".join(result.payload["waypoints"]))
 
 
 # ----------------------------------------------------------------------
@@ -342,6 +535,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--say", metavar="TEXT", help="handle one command and exit (useful for testing)"
     )
+    parser.add_argument(
+        "--manual",
+        action="store_true",
+        help="type tool commands straight at the robot; no speech, no Claude, "
+        "no internet needed (use this for robot bring-up)",
+    )
     parser.add_argument("--env", metavar="PATH", help="path to a .env file")
     return parser.parse_args(argv)
 
@@ -373,8 +572,11 @@ def main(argv: list[str] | None = None) -> int:
 
     signal.signal(signal.SIGINT, _handle_signal)
 
+    needs_microphone = not (args.text or args.say or args.manual)
     try:
-        app.start(with_microphone=not (args.text or args.say))
+        # Manual mode is the bring-up path, so it must not depend on the
+        # Anthropic SDK, a key, or a working internet connection.
+        app.start(with_microphone=needs_microphone, with_brain=not args.manual)
     except Exception as exc:
         CONSOLE.print(f"[bold red]Startup failed:[/bold red] {exc}")
         LOGGER.debug("startup failure", exc_info=True)
@@ -382,7 +584,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        if args.say:
+        if args.manual:
+            run_manual_mode(app, CONSOLE)
+        elif args.say:
             app.handle(args.say)
         elif args.text:
             CONSOLE.print("[dim]Type a command and press enter. Ctrl-C to quit.[/dim]\n")

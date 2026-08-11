@@ -91,6 +91,10 @@ class RobotInterface(abc.ABC):
     # --- posture -----------------------------------------------------------
 
     @abc.abstractmethod
+    def power_on(self) -> ActionResult:
+        """Turn motor power on without changing posture."""
+
+    @abc.abstractmethod
     def stand(self) -> ActionResult:
         """Power on if needed and stand up."""
 

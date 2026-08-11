@@ -80,6 +80,7 @@ class ToolDispatcher:
         self._speak = speak
         self._console = console or Console()
         self._handlers: dict[str, Callable[[dict[str, Any]], ActionResult]] = {
+            "power_on": self._power_on,
             "stand": self._stand,
             "sit": self._sit,
             "move": self._move,
@@ -151,6 +152,9 @@ class ToolDispatcher:
     # ------------------------------------------------------------------
     # Handlers
     # ------------------------------------------------------------------
+
+    def _power_on(self, _arguments: dict[str, Any]) -> ActionResult:
+        return self._robot.power_on()
 
     def _stand(self, _arguments: dict[str, Any]) -> ActionResult:
         if self._follow is not None and self._follow.active:

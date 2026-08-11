@@ -16,6 +16,7 @@ from spot_voice.brain.tools import (
 )
 
 EXPECTED_TOOLS = {
+    "power_on",
     "stand",
     "sit",
     "move",

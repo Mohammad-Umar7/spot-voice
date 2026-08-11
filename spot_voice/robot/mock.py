@@ -123,6 +123,15 @@ class MockSpot(RobotInterface):
 
     # --- posture -----------------------------------------------------------
 
+    def power_on(self) -> ActionResult:
+        with self._lock:
+            if self._powered:
+                return ok("My motors are already on.")
+            self._powered = True
+            self._log("power_on(power_client) -> motors on")
+        time.sleep(0.15)
+        return ok("Motors are on.")
+
     def stand(self) -> ActionResult:
         with self._lock:
             if self._docked:
