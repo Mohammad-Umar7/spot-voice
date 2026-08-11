@@ -488,6 +488,36 @@ def print_devices(console: Console) -> None:
     )
 
 
+def print_preflight(config: Config, console: Console) -> int:
+    """Run the pre-flight checks and print them. Returns a process exit code."""
+    from .preflight import run_all
+
+    console.print("[bold]Pre-flight[/bold]\n")
+    results = run_all(config)
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("", width=4)
+    table.add_column("check")
+    table.add_column("detail")
+    for result in results:
+        colour = "green" if result.ok else "red"
+        table.add_row(
+            f"[{colour}]{result.symbol}[/{colour}]", result.name, result.detail
+        )
+    console.print(table)
+
+    failures = [result for result in results if not result.ok]
+    if not failures:
+        console.print("\n[bold green]All clear.[/bold green]")
+        return 0
+    console.print()
+    for result in failures:
+        if result.fix:
+            console.print(f"[yellow]{result.name}:[/yellow] {result.fix}")
+    console.print(f"\n[bold red]{len(failures)} check(s) failed.[/bold red]")
+    return 1
+
+
 def print_banner(config: Config, console: Console) -> None:
     """Startup summary, including the safety posture."""
     table = Table.grid(padding=(0, 2))
@@ -553,6 +583,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--say", metavar="TEXT", help="handle one command and exit (useful for testing)"
     )
     parser.add_argument(
+        "--check",
+        action="store_true",
+        help="pre-flight: can this laptop reach the robot, the model API and the "
+        "microphone? Run this before a demo.",
+    )
+    parser.add_argument(
         "--manual",
         action="store_true",
         help="type tool commands straight at the robot; no speech, no Claude, "
@@ -579,6 +615,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     setup_logging(config.log_level)
+
+    if args.check:
+        return print_preflight(config, CONSOLE)
+
     print_banner(config, CONSOLE)
 
     app = VoiceApp(config, CONSOLE)

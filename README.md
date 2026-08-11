@@ -21,7 +21,7 @@ servers, no MCP anywhere — just the Anthropic Messages API and `bosdyn-client`
 4. [Picking the microphone](#picking-the-microphone)
 5. [Configuration](#configuration)
 6. [Running in mock mode](#running-in-mock-mode)
-7. [The dual-network setup](#the-dual-network-setup)
+7. [Networking](#networking)
 8. [Staged rollout on the real robot](#staged-rollout-on-the-real-robot)
 9. [What Claude can do](#what-claude-can-do)
 10. [Follow-me](#follow-me)
@@ -184,7 +184,7 @@ Everything lives in `.env`. Nothing is hardcoded and `.env` is gitignored.
 | Variable | What it does |
 |---|---|
 | `MOCK_ROBOT` | `true` simulates the robot; `false` drives a real Spot |
-| `SPOT_IP` | Spot's address on its own wifi |
+| `SPOT_IP` | Spot's address. `192.168.33.180` on the `Bridge Training` wifi |
 | `BOSDYN_CLIENT_USERNAME` / `BOSDYN_CLIENT_PASSWORD` | read by the Spot SDK itself; this project never touches them |
 | `GRAPH_PATH` | folder containing `graph`, `waypoint_snapshots/`, `edge_snapshots/` |
 | `DOCK_ID` | dock fiducial id; blank if there is no dock |
@@ -310,23 +310,39 @@ have Claude describe your actual site.
 
 ---
 
-## The dual-network setup
+## Networking
 
-**First, check which network your Spot is actually on — it decides whether any
-of this applies.**
+**The normal case is simple: join `Bridge Training`, same as the robot.**
 
-| Spot's address | What it means | What you need |
-|---|---|---|
-| `192.168.208.117` | The EDGE facility LAN. This is what the existing internal platform connects to. | If the laptop is on that network and it has internet, **one interface does everything**. Skip the rest of this section. |
-| `192.168.80.3` | Spot's own access point. No internet on it. | You need the two-interface setup below. |
+Spot lives at **`192.168.33.180`** on that wifi. If `Bridge Training` has
+internet, one interface reaches both the robot and the model API and there is
+nothing else to configure.
 
-Ping it before you plan anything:
+Confirm it in one command before a demo:
 
 ```bash
-ping 192.168.208.117
+python -m spot_voice --check
 ```
 
-The rest of this section is for the access-point case only.
+```
+PASS  robot        192.168.33.180:443 reachable
+PASS  robot login  credentials present
+PASS  model api    anthropic (claude-sonnet-4-6): api.anthropic.com:443 reachable
+PASS  microphone   USB Audio Device
+PASS  map          graph found, 214 waypoint snapshots
+```
+
+That runs real TCP connects, not guesses, and needs no credentials.
+
+> **`192.168.33.180` looks like a DHCP address**, so it can move when the robot
+> reboots. If the robot goes unreachable, re-run `--check` before debugging
+> anything else. Worth asking for a DHCP reservation if it moves often.
+
+### If you are on Spot's own access point instead
+
+`192.168.80.3` is Spot's built-in AP. **That network has no internet**, so the
+model API needs a second interface. This is the only case that needs the setup
+below.
 
 The laptop needs **two networks at once**:
 
@@ -524,6 +540,7 @@ less pleasant; nothing else changes.
 ```
 spot_voice/
   main.py            entry point, wiring, CLI, manual bring-up mode
+  preflight.py       --check: is the robot / model API / mic actually reachable
   config.py          .env loading and validation
   audio/
     devices.py       list inputs, select by substring
@@ -567,7 +584,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-281 tests, no robot and no API key required. They cover:
+304 tests, no robot and no API key required. They cover:
 
 - the reflex matcher: stop words, transcription slips, and the false positives it
   must *not* fire on
@@ -586,6 +603,8 @@ python -m pytest
   OpenAI dialect and back, malformed tool arguments, and the guarantee that an
   image block never reaches a text-only provider
 - dock state gating motion, and manual mode's command parsing
+- the pre-flight checks, including that a check which raises reports itself
+  rather than taking the whole report down
 
 Where the Spot SDK is installed, an extra set checks that every `bosdyn` symbol
 the real client uses still resolves — so an SDK rename shows up here rather than
@@ -594,6 +613,10 @@ on the robot. Those tests skip cleanly on a mock-only machine.
 ---
 
 ## Troubleshooting
+
+**Anything at all before a demo**
+Run `python -m spot_voice --check` first. It reports robot reachability, the
+model API, credentials, the microphone and the map in one table.
 
 **"No input device matching …"**
 Run `python -m spot_voice --list-devices` and copy a distinctive part of the name
@@ -609,9 +632,9 @@ utterance, so you can tell whether segmentation or transcription is at fault.
 or move the mic away from the speaker.
 
 **"I can't reach my language service right now"**
-The Anthropic call failed. Almost always the dual-network routing — see
-[The dual-network setup](#the-dual-network-setup). The robot is unaffected and
-safety words keep working.
+The model API call failed. Run `python -m spot_voice --check` — it says whether
+it is the network or a missing key. The robot is unaffected and safety words
+keep working.
 
 **"Spot is claimed by another controller"**
 Another client holds the lease. Close the tablet app or the other session. This

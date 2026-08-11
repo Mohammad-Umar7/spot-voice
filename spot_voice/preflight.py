@@ -1,0 +1,235 @@
+"""Pre-flight checks: is everything this needs actually reachable, right now?
+
+Run ``python -m spot_voice --check`` before a demo. It answers the questions
+that otherwise get answered by something failing in front of an audience: can
+this laptop reach the robot, can it reach the model API, are the credentials
+present, is the microphone there, is the map where it says it is.
+
+Uses plain TCP connects rather than the SDKs, so it is fast, needs no
+credentials, and works even when a package is missing.
+"""
+
+from __future__ import annotations
+
+import socket
+from dataclasses import dataclass
+from urllib.parse import urlparse
+
+#: Spot's gRPC/HTTPS API port.
+SPOT_API_PORT = 443
+
+#: How long to wait on each connect. Short: a demo-floor check should be quick,
+#: and anything slower than this will feel broken in use anyway.
+CONNECT_TIMEOUT_SEC = 3.0
+
+#: Where each model provider lives, for the reachability check.
+PROVIDER_HOSTS = {
+    "anthropic": "api.anthropic.com",
+    "groq": "api.groq.com",
+}
+GEMINI_HOST = "generativelanguage.googleapis.com"
+
+
+@dataclass
+class Check:
+    """One pre-flight result."""
+
+    name: str
+    ok: bool
+    detail: str
+    fix: str = ""
+
+    @property
+    def symbol(self) -> str:
+        return "PASS" if self.ok else "FAIL"
+
+
+def can_reach(host: str, port: int, timeout: float = CONNECT_TIMEOUT_SEC) -> tuple[bool, str]:
+    """Try a TCP connect. Returns ``(reachable, detail)``.
+
+    A refused connection still proves the host is *there*, which is the useful
+    distinction: "wrong port" is a very different problem from "wrong network".
+    """
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True, f"{host}:{port} reachable"
+    except socket.timeout:
+        return False, f"{host}:{port} timed out after {timeout:.0f}s"
+    except ConnectionRefusedError:
+        return False, f"{host}:{port} refused (host is up, nothing listening)"
+    except socket.gaierror as exc:
+        return False, f"{host} did not resolve ({exc.strerror or exc})"
+    except OSError as exc:
+        return False, f"{host}:{port} unreachable ({exc.strerror or exc})"
+
+
+def _host_of(value: str) -> str:
+    """Accept a bare host, an IP, or a URL and return just the host."""
+    value = (value or "").strip()
+    if "://" in value:
+        return urlparse(value).hostname or value
+    return value.split("/")[0].split(":")[0]
+
+
+# ----------------------------------------------------------------------
+# Individual checks
+# ----------------------------------------------------------------------
+
+
+def check_robot(config) -> Check:
+    """Can this laptop reach Spot's API?"""
+    if config.mock_robot:
+        return Check("robot", True, "MOCK_ROBOT=true, no robot needed")
+    host = _host_of(config.spot_ip)
+    if not host:
+        return Check("robot", False, "SPOT_IP is not set", "Set SPOT_IP in .env")
+    ok, detail = can_reach(host, SPOT_API_PORT)
+    return Check(
+        "robot",
+        ok,
+        detail,
+        "" if ok else (
+            "Check you are on the robot's wifi and that SPOT_IP is current -- "
+            "a DHCP address can move when the robot reboots."
+        ),
+    )
+
+
+def check_robot_credentials(config) -> Check:
+    """Are the Spot credentials the SDK reads actually present?"""
+    import os
+
+    from .config import BOSDYN_PASSWORD_ENV, BOSDYN_USERNAME_ENV
+
+    if config.mock_robot:
+        return Check("robot login", True, "MOCK_ROBOT=true, not needed")
+    missing = [
+        name for name in (BOSDYN_USERNAME_ENV, BOSDYN_PASSWORD_ENV) if not os.getenv(name)
+    ]
+    if missing:
+        return Check(
+            "robot login", False, f"missing: {', '.join(missing)}", "Set them in .env"
+        )
+    return Check("robot login", True, "credentials present")
+
+
+def check_spot_sdk(config) -> Check:
+    """Is the Boston Dynamics SDK importable?"""
+    if config.mock_robot:
+        return Check("spot sdk", True, "MOCK_ROBOT=true, not imported")
+    try:
+        import bosdyn.client  # noqa: F401
+    except ImportError as exc:
+        return Check("spot sdk", False, str(exc), "pip install bosdyn-client")
+    return Check("spot sdk", True, "bosdyn-client importable")
+
+
+def check_model_provider(config) -> Check:
+    """Can this laptop reach the tool-calling provider, and is there a key?"""
+    provider = config.llm_provider
+    host = PROVIDER_HOSTS.get(provider)
+    if host is None:
+        return Check("model api", False, f"unknown provider {provider!r}", "Fix LLM_PROVIDER")
+    if not config.llm_api_key:
+        return Check(
+            "model api",
+            False,
+            f"{provider}: no API key set",
+            f"Set the {provider.upper()}_API_KEY in .env",
+        )
+    ok, detail = can_reach(host, 443)
+    return Check(
+        "model api",
+        ok,
+        f"{provider} ({config.llm_model}): {detail}",
+        "" if ok else (
+            "No internet path. On the robot's own access point you need a second "
+            "interface -- phone tether or ethernet. See the README."
+        ),
+    )
+
+
+def check_vision_provider(config) -> Check:
+    """Can this laptop reach the vision provider, if one is configured?"""
+    choice = config.vision_provider
+    if choice in {"", "none"}:
+        return Check("vision api", True, "no vision provider; photos will not be described")
+    if choice == "anthropic":
+        return Check("vision api", True, "images handled by the model itself")
+    if choice == "gemini":
+        if not config.gemini_api_key:
+            return Check(
+                "vision api", False, "GEMINI_API_KEY is not set", "Set it, or VISION_PROVIDER=none"
+            )
+        ok, detail = can_reach(GEMINI_HOST, 443)
+        return Check("vision api", ok, f"gemini ({config.gemini_model}): {detail}")
+    return Check("vision api", False, f"unknown provider {choice!r}", "Fix VISION_PROVIDER")
+
+
+def check_microphone(config) -> Check:
+    """Does the configured microphone exist?"""
+    from .audio.devices import MicrophoneNotFound, list_input_devices, select_input_device
+
+    devices = list_input_devices()
+    if not devices:
+        return Check(
+            "microphone", False, "no input devices found", "Check the audio stack / drivers"
+        )
+    try:
+        index = select_input_device(config.mic_device_name, devices)
+    except MicrophoneNotFound:
+        names = ", ".join(device.name for device in devices[:4])
+        return Check(
+            "microphone",
+            False,
+            f"nothing matches {config.mic_device_name!r}",
+            f"Available: {names}. Run --list-devices for the full list.",
+        )
+    if index is None:
+        default = next((d for d in devices if d.is_default), devices[0])
+        return Check("microphone", True, f"system default: {default.name}")
+    chosen = next(device for device in devices if device.index == index)
+    return Check("microphone", True, chosen.name)
+
+
+def check_map(config) -> Check:
+    """Is the GraphNav map where GRAPH_PATH says it is?"""
+    if config.graph_path is None:
+        return Check("map", True, "no GRAPH_PATH set; navigate_to will be unavailable")
+    if not config.graph_path.exists():
+        return Check("map", False, f"{config.graph_path} does not exist", "Fix GRAPH_PATH")
+    if not (config.graph_path / "graph").exists():
+        return Check(
+            "map",
+            False,
+            f"no 'graph' file inside {config.graph_path}",
+            "GRAPH_PATH should point at the 'downloaded_graph' folder itself",
+        )
+    waypoints = config.graph_path / "waypoint_snapshots"
+    count = len(list(waypoints.iterdir())) if waypoints.is_dir() else 0
+    return Check("map", True, f"graph found, {count} waypoint snapshots")
+
+
+#: Every check, in the order they are worth reading.
+ALL_CHECKS = (
+    check_robot,
+    check_robot_credentials,
+    check_spot_sdk,
+    check_model_provider,
+    check_vision_provider,
+    check_microphone,
+    check_map,
+)
+
+
+def run_all(config) -> list[Check]:
+    """Run every pre-flight check. Never raises."""
+    results: list[Check] = []
+    for check in ALL_CHECKS:
+        try:
+            results.append(check(config))
+        except Exception as exc:  # a broken check must not hide the others
+            results.append(
+                Check(getattr(check, "__name__", "check"), False, f"check failed: {exc}")
+            )
+    return results
