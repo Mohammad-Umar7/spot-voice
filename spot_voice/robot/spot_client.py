@@ -423,8 +423,16 @@ class SpotClient(RobotInterface):
             known = ", ".join(names) if names else "nothing yet"
             return fail(f"I don't know a place called {waypoint_name}. I know: {known}.")
 
+        from bosdyn.client.robot_command import blocking_stand
+
         try:
             self._call("power on", self._power_on_if_needed)
+            # Stand before localizing. The reference platform does this too, and
+            # the reason is physical: fiducial localization works off what the
+            # body cameras can see, and a sitting robot's cameras sit low and
+            # angled at the floor. Standing first makes the fix far more likely
+            # to succeed on the first try.
+            self._call("stand", lambda: blocking_stand(self._command_client, timeout_sec=10))
             if not self._graphnav.localized:
                 self._call("localize", self._graphnav.localize_on_fiducial)
         except Exception as exc:

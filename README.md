@@ -264,7 +264,21 @@ have Claude describe your actual site.
 
 ## The dual-network setup
 
-This is the part that catches people out.
+**First, check which network your Spot is actually on — it decides whether any
+of this applies.**
+
+| Spot's address | What it means | What you need |
+|---|---|---|
+| `192.168.208.117` | The EDGE facility LAN. This is what the existing internal platform connects to. | If the laptop is on that network and it has internet, **one interface does everything**. Skip the rest of this section. |
+| `192.168.80.3` | Spot's own access point. No internet on it. | You need the two-interface setup below. |
+
+Ping it before you plan anything:
+
+```bash
+ping 192.168.208.117
+```
+
+The rest of this section is for the access-point case only.
 
 The laptop needs **two networks at once**:
 
