@@ -188,8 +188,11 @@ Everything lives in `.env`. Nothing is hardcoded and `.env` is gitignored.
 | `BOSDYN_CLIENT_USERNAME` / `BOSDYN_CLIENT_PASSWORD` | read by the Spot SDK itself; this project never touches them |
 | `GRAPH_PATH` | folder containing `graph`, `waypoint_snapshots/`, `edge_snapshots/` |
 | `DOCK_ID` | dock fiducial id; blank if there is no dock |
-| `ANTHROPIC_API_KEY` | your key |
-| `ANTHROPIC_MODEL` | default `claude-sonnet-4-6` |
+| `LLM_PROVIDER` | `anthropic` or `groq` — who does tool calling |
+| `VISION_PROVIDER` | `anthropic`, `gemini` or `none` — who reads camera frames. Blank picks automatically |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` | production; model defaults to `claude-sonnet-4-6` |
+| `GROQ_API_KEY` / `GROQ_MODEL` | testing tool calling |
+| `GEMINI_API_KEY` / `GEMINI_MODEL` | testing vision |
 | `MIC_DEVICE_NAME` | substring of the input device name |
 | `WHISPER_MODEL` | `tiny` / `base` / `small` |
 | `STT_LANGUAGE` | forced decode language, default `en` |
@@ -198,6 +201,48 @@ Everything lives in `.env`. Nothing is hardcoded and `.env` is gitignored.
 | `AUDIO_OUT` | `robot` (Spot CAM speaker) or `laptop` |
 | `MUTE_WHILE_SPEAKING` | gate the mic while Spot talks; default `true` |
 | `LOG_LEVEL` | `DEBUG` / `INFO` / `WARNING` |
+
+### Model providers
+
+Two independent choices — who does the tool calling, and who reads camera
+frames. Anthropic is the production target; the others exist so the system can
+be wired up and rehearsed cheaply first.
+
+```
+LLM_PROVIDER=groq       VISION_PROVIDER=gemini      # testing
+LLM_PROVIDER=anthropic  VISION_PROVIDER=anthropic   # production
+```
+
+Switching is those two lines. Nothing above the provider layer knows the
+difference, because the internal message format **is** Anthropic's — the Groq
+adapter translates at the edge, so the final switch deletes translation rather
+than adding it.
+
+**One behaviour genuinely differs, and it matters for inspection work.** Groq's
+models are text-only, so a camera frame cannot reach them. When
+`supports_images` is false, the agent sends the JPEG to the vision provider
+first and puts its written description in the `tool_result` where the image
+would have gone:
+
+| | Anthropic | Groq + Gemini |
+|---|---|---|
+| `capture_image` returns | the photo itself | prose describing the photo |
+| The reasoning model | looks at it | reads someone else's description |
+| Anything the describer misses | still visible | **invisible** |
+
+So "go to the panel and tell me what you see" works on both, but on the testing
+providers the answer is only as good as Gemini's description. If an inspection
+answer seems thin, that is the first thing to check — the `vision` line in the
+console shows exactly what was passed downstream.
+
+If no vision provider is configured, the robot says plainly that it took a photo
+it cannot interpret. That is deliberate: a truthful "I can't see it" beats a
+hallucinated description of a facility you are inspecting.
+
+**Safety is not affected by this choice.** Safety words never reach any model,
+and the velocity caps are enforced in the robot layer regardless of what gets
+called. A weaker model calls tools less accurately, which costs you a retry —
+not a safety margin.
 
 ### A note on the model
 
@@ -241,6 +286,9 @@ python -m spot_voice
 
 # Type instead of talking (no microphone, no Whisper model download)
 python -m spot_voice --text
+
+# Drive the robot directly, no speech and no model at all (bring-up)
+python -m spot_voice --manual
 
 # One command and exit
 python -m spot_voice --say "go to the control panel and tell me what you see"
@@ -475,7 +523,7 @@ less pleasant; nothing else changes.
 
 ```
 spot_voice/
-  main.py            entry point, wiring, CLI
+  main.py            entry point, wiring, CLI, manual bring-up mode
   config.py          .env loading and validation
   audio/
     devices.py       list inputs, select by substring
@@ -488,7 +536,8 @@ spot_voice/
     prompts.py       the system prompt
     tools.py         the thirteen tool schemas
     dispatcher.py    the single choke point for every tool call
-    agent.py         the Anthropic Messages API tool-use loop
+    agent.py         the provider-independent tool-use loop
+    providers/       anthropic (production), groq + gemini (testing)
   robot/
     base.py          the interface mock and real both implement
     limits.py        hard velocity caps
@@ -518,7 +567,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-209 tests, no robot and no API key required. They cover:
+281 tests, no robot and no API key required. They cover:
 
 - the reflex matcher: stop words, transcription slips, and the false positives it
   must *not* fire on
@@ -533,6 +582,10 @@ python -m pytest
 - conversation trimming, which must never leave an orphaned `tool_result`
 - that the mock and the real client stay signature-identical, so mock mode keeps
   predicting what the robot will actually do
+- the provider translation layer: Anthropic tool schemas and tool plumbing to the
+  OpenAI dialect and back, malformed tool arguments, and the guarantee that an
+  image block never reaches a text-only provider
+- dock state gating motion, and manual mode's command parsing
 
 Where the Spot SDK is installed, an extra set checks that every `bosdyn` symbol
 the real client uses still resolves — so an SDK rename shows up here rather than

@@ -9,8 +9,14 @@ bosdyn-client>=4.1,<5
 bosdyn-api>=4.1,<5
 bosdyn-core>=4.1,<5
 
-# --- Claude (direct Anthropic Messages API; no MCP anywhere) ----------------
+# --- Models -----------------------------------------------------------------
+# Anthropic is the production target (direct Messages API; no MCP anywhere).
+# Groq and Gemini are the testing providers -- see LLM_PROVIDER in .env.
+# Only the selected provider's package is imported at runtime, so you can
+# install just the one you are using.
 anthropic>=0.40
+groq>=0.11
+google-generativeai>=0.8
 
 # --- Voice in: capture, VAD, local speech-to-text ---------------------------
 sounddevice>=0.4.6

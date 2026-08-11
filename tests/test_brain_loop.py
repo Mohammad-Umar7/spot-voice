@@ -1,108 +1,94 @@
-"""End-to-end shape of the Anthropic tool-use loop, with a scripted fake client.
+"""End-to-end shape of the tool-use loop, against a scripted fake provider.
 
-No API key and no network: a stand-in ``anthropic`` module is injected so the
-loop, the tool round-trip, the image attachment and the error paths can all be
-exercised deterministically.
+No API key, no network, no provider SDK. Because the loop now sits on the
+provider interface, this exercises the real loop rather than a mocked SDK.
 """
 
 from __future__ import annotations
 
 import json
-import sys
-import types
 
 import pytest
 from rich.console import Console
 
+from spot_voice.brain.agent import Brain
 from spot_voice.brain.dispatcher import ToolDispatcher
+from spot_voice.brain.providers import LLMProvider, ProviderResponse, TextBlock, ToolCall
+from spot_voice.brain.providers.base import ToolUseBlock, VisionProvider
 from spot_voice.robot.mock import MockSpot
 
 QUIET = Console(quiet=True)
 
 
 # ----------------------------------------------------------------------
-# A minimal stand-in for the anthropic SDK.
+# Fakes
 
 
-class _Block:
-    def __init__(self, type_: str, **fields) -> None:
-        self.type = type_
-        for key, value in fields.items():
-            setattr(self, key, value)
+class FakeError(Exception):
+    """A provider-specific error the fake knows how to describe."""
 
 
-class _Usage:
-    input_tokens = 100
-    output_tokens = 20
-    cache_creation_input_tokens = 0
-    cache_read_input_tokens = 90
+class FakeProvider(LLMProvider):
+    """Replays a scripted list of responses and records every request."""
 
+    name = "fake"
 
-class _Response:
-    def __init__(self, content, stop_reason: str) -> None:
-        self.content = content
-        self.stop_reason = stop_reason
-        self.usage = _Usage()
-
-
-class _Messages:
-    def __init__(self, script) -> None:
-        self._script = list(script)
+    def __init__(self, script, supports_images: bool = True) -> None:
+        self.script = list(script)
+        self.supports_images = supports_images
         self.calls: list[dict] = []
 
-    def create(self, **kwargs):
-        # Snapshot the message list: the Brain passes its live history and keeps
-        # appending to it, so keeping the reference would show later state.
-        snapshot = dict(kwargs)
-        snapshot["messages"] = list(kwargs.get("messages", []))
-        self.calls.append(snapshot)
-        step = self._script.pop(0)
+    def complete(self, system, tools, messages, max_tokens):
+        # Snapshot: the Brain passes its live history and keeps appending.
+        self.calls.append(
+            {
+                "system": system,
+                "tools": tools,
+                "messages": list(messages),
+                "max_tokens": max_tokens,
+            }
+        )
+        step = self.script.pop(0)
         if isinstance(step, Exception):
             raise step
         return step
 
+    def describe_error(self, exc):
+        if isinstance(exc, FakeError):
+            return "I can't reach my language service right now, but safety commands still work."
+        return None
 
-class _FakeClient:
-    def __init__(self, script, **_kwargs) -> None:
-        self.messages = _Messages(script)
+
+class FakeVision(VisionProvider):
+    name = "fake-vision"
+
+    def __init__(self, text: str = "Six gauges and a hazard sign.") -> None:
+        self.text = text
+        self.seen: list[bytes] = []
+
+    def describe(self, image_jpeg: bytes, prompt: str = "") -> str:
+        self.seen.append(image_jpeg)
+        return self.text
 
 
-def _install_fake_anthropic(monkeypatch, script):
-    """Put a fake ``anthropic`` module in ``sys.modules`` and return the client."""
-    holder: dict[str, _FakeClient] = {}
+class ExplodingVision(VisionProvider):
+    name = "broken-vision"
 
-    module = types.ModuleType("anthropic")
+    def describe(self, image_jpeg: bytes, prompt: str = "") -> str:
+        raise RuntimeError("quota exceeded")
 
-    class APIError(Exception):
-        pass
 
-    class APIStatusError(APIError):
-        def __init__(self, message="", status_code=500):
-            super().__init__(message)
-            self.status_code = status_code
+def reply(text: str) -> ProviderResponse:
+    return ProviderResponse(
+        content=[TextBlock(text=text)], stop_reason="end_turn", text=text
+    )
 
-    class APIConnectionError(APIError):
-        pass
 
-    class RateLimitError(APIStatusError):
-        pass
-
-    class AuthenticationError(APIStatusError):
-        pass
-
-    def _factory(**kwargs):
-        client = _FakeClient(script, **kwargs)
-        holder["client"] = client
-        return client
-
-    module.Anthropic = _factory  # type: ignore[attr-defined]
-    module.APIError = APIError  # type: ignore[attr-defined]
-    module.APIStatusError = APIStatusError  # type: ignore[attr-defined]
-    module.APIConnectionError = APIConnectionError  # type: ignore[attr-defined]
-    module.RateLimitError = RateLimitError  # type: ignore[attr-defined]
-    module.AuthenticationError = AuthenticationError  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "anthropic", module)
-    return module, holder
+def calls(*specs) -> ProviderResponse:
+    """Build a tool_use turn from ``(id, name, input)`` triples."""
+    tool_calls = [ToolCall(i, n, a) for i, n, a in specs]
+    content = [ToolUseBlock(id=i, name=n, input=a) for i, n, a in specs]
+    return ProviderResponse(content=content, tool_calls=tool_calls, stop_reason="tool_use")
 
 
 @pytest.fixture()
@@ -112,211 +98,208 @@ def dispatcher():
     return ToolDispatcher(robot=robot, console=QUIET)
 
 
-def _make_brain(monkeypatch, script, dispatcher):
-    module, holder = _install_fake_anthropic(monkeypatch, script)
-    from spot_voice.brain.agent import Brain
-
-    brain = Brain(
-        api_key="test-key",
-        model="claude-sonnet-4-6",
-        dispatcher=dispatcher,
-        console=QUIET,
-    )
-    return brain, module, holder
+def make_brain(dispatcher, script, supports_images=True, vision=None):
+    provider = FakeProvider(script, supports_images=supports_images)
+    brain = Brain(provider=provider, dispatcher=dispatcher, vision=vision, console=QUIET)
+    return brain, provider
 
 
 # ----------------------------------------------------------------------
 # Happy paths
 
 
-def test_plain_answer_needs_no_tools(monkeypatch, dispatcher):
-    script = [_Response([_Block("text", text="I'm ready.")], "end_turn")]
-    brain, _module, holder = _make_brain(monkeypatch, script, dispatcher)
+def test_plain_answer_needs_no_tools(dispatcher):
+    brain, provider = make_brain(dispatcher, [reply("I'm ready.")])
 
-    reply = brain.handle("are you there")
+    result = brain.handle("are you there")
 
-    assert reply.text == "I'm ready."
-    assert reply.tool_calls == []
-    assert len(holder["client"].messages.calls) == 1
+    assert result.text == "I'm ready."
+    assert result.tool_calls == []
+    assert len(provider.calls) == 1
 
 
-def test_tool_call_round_trip(monkeypatch, dispatcher):
-    script = [
-        _Response(
-            [_Block("tool_use", id="toolu_1", name="stand", input={})],
-            "tool_use",
-        ),
-        _Response([_Block("text", text="Standing.")], "end_turn"),
-    ]
-    brain, _module, holder = _make_brain(monkeypatch, script, dispatcher)
+def test_tool_call_round_trip(dispatcher):
+    brain, provider = make_brain(
+        dispatcher, [calls(("t1", "stand", {})), reply("Standing.")]
+    )
 
-    reply = brain.handle("stand up please")
+    result = brain.handle("stand up please")
 
-    assert reply.text == "Standing."
-    assert [call.name for call in reply.tool_calls] == ["stand"]
+    assert result.text == "Standing."
+    assert [call.name for call in result.tool_calls] == ["stand"]
 
-    # The second request must carry the tool_result back in a single user turn.
-    second = holder["client"].messages.calls[1]["messages"]
-    tool_turn = second[-1]
+    tool_turn = provider.calls[1]["messages"][-1]
     assert tool_turn["role"] == "user"
     assert tool_turn["content"][0]["type"] == "tool_result"
-    payload = json.loads(tool_turn["content"][0]["content"][0]["text"])
-    assert payload["ok"] is True
+    assert json.loads(tool_turn["content"][0]["content"][0]["text"])["ok"] is True
 
 
-def test_inspection_flow_attaches_the_photo_for_the_model_to_see(
-    monkeypatch, dispatcher
-):
-    script = [
-        _Response(
-            [
-                _Block(
-                    "tool_use",
-                    id="toolu_1",
-                    name="navigate_to",
-                    input={"waypoint_name": "control-panel"},
-                )
-            ],
-            "tool_use",
-        ),
-        _Response(
-            [_Block("tool_use", id="toolu_2", name="capture_image", input={})],
-            "tool_use",
-        ),
-        _Response(
-            [_Block("text", text="I see a control panel with six gauges.")], "end_turn"
-        ),
-    ]
-    brain, _module, holder = _make_brain(monkeypatch, script, dispatcher)
-
-    reply = brain.handle("go to the control panel and tell me what you see")
-
-    assert [call.name for call in reply.tool_calls] == ["navigate_to", "capture_image"]
-    assert "control panel" in reply.text
-
-    last_turn = holder["client"].messages.calls[2]["messages"][-1]
-    blocks = last_turn["content"][0]["content"]
-    assert any(block["type"] == "image" for block in blocks)
-    image = next(block for block in blocks if block["type"] == "image")
-    assert image["source"]["media_type"] == "image/jpeg"
-
-
-def test_parallel_tool_calls_come_back_in_one_user_message(monkeypatch, dispatcher):
-    script = [
-        _Response(
-            [
-                _Block("tool_use", id="a", name="get_status", input={}),
-                _Block("tool_use", id="b", name="list_waypoints", input={}),
-            ],
-            "tool_use",
-        ),
-        _Response([_Block("text", text="All good.")], "end_turn"),
-    ]
-    brain, _module, holder = _make_brain(monkeypatch, script, dispatcher)
+def test_parallel_tool_calls_come_back_in_one_user_message(dispatcher):
+    brain, provider = make_brain(
+        dispatcher,
+        [calls(("a", "get_status", {}), ("b", "list_waypoints", {})), reply("All good.")],
+    )
 
     brain.handle("status and places")
 
-    tool_turn = holder["client"].messages.calls[1]["messages"][-1]
+    tool_turn = provider.calls[1]["messages"][-1]
     assert len(tool_turn["content"]) == 2
     assert {block["tool_use_id"] for block in tool_turn["content"]} == {"a", "b"}
 
 
 # ----------------------------------------------------------------------
-# Prompt caching
+# Images: the behaviour that differs by provider
 
 
-def test_system_and_tools_carry_cache_breakpoints(monkeypatch, dispatcher):
-    script = [_Response([_Block("text", text="hi")], "end_turn")]
-    brain, _module, holder = _make_brain(monkeypatch, script, dispatcher)
+def test_a_seeing_provider_gets_the_photo_itself(dispatcher):
+    brain, provider = make_brain(
+        dispatcher,
+        [calls(("t1", "capture_image", {})), reply("I see a control panel.")],
+        supports_images=True,
+    )
+
+    brain.handle("what do you see")
+
+    blocks = provider.calls[1]["messages"][-1]["content"][0]["content"]
+    image = next(block for block in blocks if block["type"] == "image")
+    assert image["source"]["media_type"] == "image/jpeg"
+
+
+def test_a_text_only_provider_gets_a_written_description_instead(dispatcher):
+    vision = FakeVision("Six gauges, a hazard sign, and a pallet.")
+    brain, provider = make_brain(
+        dispatcher,
+        [calls(("t1", "capture_image", {})), reply("I see gauges and a hazard sign.")],
+        supports_images=False,
+        vision=vision,
+    )
+
+    brain.handle("what do you see")
+
+    blocks = provider.calls[1]["messages"][-1]["content"][0]["content"]
+    # No image block at all -- the model could not read one.
+    assert all(block["type"] != "image" for block in blocks)
+    payload = json.loads(blocks[0]["text"])
+    assert payload["image_description"] == "Six gauges, a hazard sign, and a pallet."
+    assert len(vision.seen) == 1
+    assert vision.seen[0][:2] == b"\xff\xd8"  # a real JPEG reached the vision model
+
+
+def test_a_broken_vision_provider_says_so_rather_than_inventing(dispatcher):
+    brain, provider = make_brain(
+        dispatcher,
+        [calls(("t1", "capture_image", {})), reply("I couldn't see it.")],
+        supports_images=False,
+        vision=ExplodingVision(),
+    )
+
+    brain.handle("what do you see")
+
+    payload = json.loads(
+        provider.calls[1]["messages"][-1]["content"][0]["content"][0]["text"]
+    )
+    assert "could not see" in payload["image_description"]
+    assert "RuntimeError" in payload["image_description"]
+
+
+def test_no_vision_provider_at_all_is_handled(dispatcher):
+    brain, provider = make_brain(
+        dispatcher,
+        [calls(("t1", "capture_image", {})), reply("I can't see it.")],
+        supports_images=False,
+        vision=None,
+    )
+
+    brain.handle("what do you see")
+
+    payload = json.loads(
+        provider.calls[1]["messages"][-1]["content"][0]["content"][0]["text"]
+    )
+    assert "cannot see" in payload["image_description"]
+
+
+# ----------------------------------------------------------------------
+# Prompt shape
+
+
+def test_system_and_tools_carry_cache_breakpoints(dispatcher):
+    brain, provider = make_brain(dispatcher, [reply("hi")])
 
     brain.handle("hello")
 
-    call = holder["client"].messages.calls[0]
+    call = provider.calls[0]
     assert call["system"][-1]["cache_control"] == {"type": "ephemeral"}
     assert call["tools"][-1]["cache_control"] == {"type": "ephemeral"}
 
 
-def test_system_and_tools_are_byte_identical_across_turns(monkeypatch, dispatcher):
-    script = [
-        _Response([_Block("text", text="one")], "end_turn"),
-        _Response([_Block("text", text="two")], "end_turn"),
-    ]
-    brain, _module, holder = _make_brain(monkeypatch, script, dispatcher)
+def test_system_and_tools_are_byte_identical_across_turns(dispatcher):
+    brain, provider = make_brain(dispatcher, [reply("one"), reply("two")])
 
     brain.handle("first")
     brain.handle("second")
 
-    calls = holder["client"].messages.calls
     # Any drift in the prefix would silently destroy the cache hit rate.
-    assert calls[0]["system"] == calls[1]["system"]
-    assert calls[0]["tools"] == calls[1]["tools"]
+    assert provider.calls[0]["system"] == provider.calls[1]["system"]
+    assert provider.calls[0]["tools"] == provider.calls[1]["tools"]
 
 
 # ----------------------------------------------------------------------
 # Failure paths
 
 
-def test_connection_failure_yields_a_speakable_sentence(monkeypatch, dispatcher):
-    module, _holder = _install_fake_anthropic(monkeypatch, [])
-    from spot_voice.brain.agent import Brain
+def test_provider_failure_yields_a_speakable_sentence(dispatcher):
+    brain, _provider = make_brain(dispatcher, [FakeError("no route to host")])
 
-    brain = Brain("k", "claude-sonnet-4-6", dispatcher, console=QUIET)
-    brain._client.messages._script = [module.APIConnectionError("no route to host")]
+    result = brain.handle("what do you see")
 
-    reply = brain.handle("what do you see")
-
-    assert reply.error
-    assert "safety commands still work" in reply.text
-    # The unanswered user turn must not linger in the history.
-    assert brain._messages == []
+    assert result.error
+    assert "safety commands still work" in result.text
+    assert brain._messages == []  # the unanswered turn must not linger
 
 
-def test_refusal_is_handled_without_touching_content(monkeypatch, dispatcher):
-    script = [_Response([], "refusal")]
-    brain, _module, _holder = _make_brain(monkeypatch, script, dispatcher)
+def test_an_undescribed_error_still_produces_something_speakable(dispatcher):
+    brain, _provider = make_brain(dispatcher, [ValueError("something odd")])
 
-    reply = brain.handle("do something unsafe")
+    result = brain.handle("hello")
 
-    assert reply.text == "I can't help with that one."
+    assert result.text
+    assert "Safety commands still work" in result.text
 
 
-def test_abort_cancels_an_in_flight_tool_loop(monkeypatch, dispatcher):
-    script = [
-        _Response(
-            [_Block("tool_use", id="toolu_1", name="get_status", input={})], "tool_use"
-        ),
-        _Response([_Block("text", text="never reached")], "end_turn"),
-    ]
-    brain, _module, _holder = _make_brain(monkeypatch, script, dispatcher)
+def test_refusal_is_handled_without_touching_content(dispatcher):
+    brain, _provider = make_brain(
+        dispatcher, [ProviderResponse(content=[], stop_reason="refusal")]
+    )
 
+    assert brain.handle("do something unsafe").text == "I can't help with that one."
+
+
+def test_abort_cancels_an_in_flight_tool_loop(dispatcher, monkeypatch):
+    brain, _provider = make_brain(
+        dispatcher, [calls(("t1", "get_status", {})), reply("never reached")]
+    )
     original = dispatcher.dispatch
 
     def dispatch_then_abort(name, tool_input):
         result = original(name, tool_input)
-        brain.abort()  # simulate the operator saying "stop" mid-sequence
+        brain.abort()  # the operator said "stop" mid-sequence
         return result
 
     monkeypatch.setattr(dispatcher, "dispatch", dispatch_then_abort)
 
-    reply = brain.handle("what's your status")
+    result = brain.handle("what's your status")
 
-    assert reply.aborted is True
-    assert reply.text == ""
+    assert result.aborted is True
+    assert result.text == ""
 
 
-def test_the_loop_cannot_run_away(monkeypatch, dispatcher):
+def test_the_loop_cannot_run_away(dispatcher):
     from spot_voice.brain.agent import MAX_TOOL_ITERATIONS
 
-    script = [
-        _Response(
-            [_Block("tool_use", id=f"t{index}", name="get_status", input={})],
-            "tool_use",
-        )
-        for index in range(MAX_TOOL_ITERATIONS + 4)
-    ]
-    brain, _module, holder = _make_brain(monkeypatch, script, dispatcher)
+    script = [calls((f"t{i}", "get_status", {})) for i in range(MAX_TOOL_ITERATIONS + 4)]
+    brain, provider = make_brain(dispatcher, script)
 
-    reply = brain.handle("loop forever")
+    result = brain.handle("loop forever")
 
-    assert len(holder["client"].messages.calls) == MAX_TOOL_ITERATIONS
-    assert reply.text
+    assert len(provider.calls) == MAX_TOOL_ITERATIONS
+    assert result.text

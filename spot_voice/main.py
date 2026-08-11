@@ -135,29 +135,8 @@ class VoiceApp:
         if not with_brain:
             # Manual mode. Deliberately no brain; run_manual_mode says so.
             pass
-        elif self.config.brain_enabled:
-            try:
-                from .brain.agent import Brain
-
-                self.brain = Brain(
-                    api_key=self.config.anthropic_api_key,
-                    model=self.config.anthropic_model,
-                    dispatcher=self.dispatcher,
-                    extra_context=self._map_context(),
-                    console=self.console,
-                )
-            except ImportError as exc:
-                # Degrade rather than refuse to start: the reflex lane is the
-                # part that matters most and it has no dependency on this.
-                self.console.print(
-                    f"[yellow]Anthropic SDK unavailable ({exc}) -- running "
-                    "reflex-only. Run: pip install anthropic[/yellow]"
-                )
         else:
-            self.console.print(
-                "[yellow]No ANTHROPIC_API_KEY -- running reflex-only. "
-                "Safety words work; conversation does not.[/yellow]"
-            )
+            self._build_brain()
 
         if with_microphone:
             from .audio.listener import Listener
@@ -174,6 +153,44 @@ class VoiceApp:
                 console=self.console,
             )
             self.listener.start()
+
+    def _build_brain(self) -> None:
+        """Construct the model providers named in .env.
+
+        Degrades rather than refusing to start: a missing key or SDK leaves the
+        reflex lane running, which is the part that matters most and has no
+        dependency on any of this.
+        """
+        from .brain.agent import Brain
+        from .brain.providers import (
+            ProviderUnavailable,
+            build_llm_provider,
+            build_vision_provider,
+        )
+
+        try:
+            provider = build_llm_provider(self.config)
+        except ProviderUnavailable as exc:
+            self.console.print(
+                f"[yellow]No language model ({exc}) -- running reflex-only. "
+                "Safety words work; conversation does not.[/yellow]"
+            )
+            return
+
+        vision = build_vision_provider(self.config)
+        if vision is not None and not provider.supports_images:
+            self.console.print(
+                f"[dim]{provider.name} cannot see images, so camera frames go "
+                f"through {vision.name} and come back as text.[/dim]"
+            )
+
+        self.brain = Brain(
+            provider=provider,
+            dispatcher=self.dispatcher,
+            vision=vision,
+            extra_context=self._map_context(),
+            console=self.console,
+        )
 
     def report_robot_state(self) -> None:
         """Print what the robot is doing right now, and anything blocking motion.

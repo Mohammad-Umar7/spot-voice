@@ -1,19 +1,22 @@
-"""The Claude lane: a direct Anthropic Messages API tool-use loop.
+"""The language lane: a tool-use loop over a swappable model provider.
 
-No MCP, no tool servers, no framework -- just ``anthropic.Anthropic`` and a loop
-over ``tool_use`` blocks. Anything the reflex lane did not catch arrives here.
+The loop itself is provider-independent. It sends a turn, executes whatever
+tools come back through the single dispatcher, feeds the results in, and repeats
+until the model stops calling tools. Which model is on the other end -- Anthropic
+in production, Groq during bring-up -- is a config decision made in
+:mod:`spot_voice.brain.providers`.
 
 Design notes:
 
-* **Prompt caching.** Tools render before ``system``, and both are frozen for the
-  whole session, so a single cache breakpoint on each keeps the fixed prefix warm
-  across the many short turns a voice session produces.
-* **No thinking parameter.** Voice replies are one or two sentences and latency
-  is what the operator feels. Omitting ``thinking`` gives the fastest first token
-  on the default model and is valid on every current model, so the model id in
-  ``.env`` can be swapped without touching code.
-* **Rolling history.** Trimming never orphans a ``tool_result``: the window is
-  repaired so it always starts on a clean user turn.
+* **Canonical format is Anthropic's.** History, content blocks and tool schemas
+  are held in Anthropic shape; adapters translate at the edge. Switching to
+  Anthropic at the end therefore removes translation rather than adding it.
+* **Images depend on the provider.** When the model can see (Anthropic), a
+  camera frame is attached as an image block. When it cannot (Groq), the frame
+  goes to the vision provider first and its written description takes the
+  image's place -- so the tool-calling model reads prose rather than pixels.
+* **Rolling history never orphans a tool_result.** Trimming repairs the window
+  so it always starts on a clean user turn.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ from rich.console import Console
 
 from .dispatcher import DispatchResult, ToolDispatcher
 from .prompts import system_blocks
+from .providers import LLMProvider, VisionProvider
 from .tools import tools_with_cache_breakpoint
 
 LOGGER = logging.getLogger(__name__)
@@ -39,9 +43,6 @@ MAX_HISTORY_MESSAGES = 24
 MAX_TOOL_ITERATIONS = 8
 #: Spoken replies are short; this is generous headroom, not a target.
 MAX_TOKENS = 1024
-#: Request timeout, generous because the Anthropic call may be going out over a
-#: phone tether while the robot link uses the other interface.
-REQUEST_TIMEOUT_SEC = 60.0
 
 
 @dataclass
@@ -55,35 +56,29 @@ class BrainReply:
 
 
 class Brain:
-    """Runs the Anthropic tool-use loop for one voice session.
+    """Runs the tool-use loop for one voice session.
 
     Args:
-        api_key: Anthropic API key (from ``.env``; never hardcoded).
-        model: Model id, e.g. ``claude-sonnet-4-6``.
+        provider: The tool-calling model.
         dispatcher: Executes tool calls against the robot.
-        extra_context: Optional stable, site-specific text appended to the system
-            prompt (for example the waypoint list on this map).
+        vision: Used to describe camera frames when ``provider`` cannot see
+            images. Ignored when it can.
+        extra_context: Stable, site-specific text appended to the system prompt
+            (for example the waypoint list on this map).
         console: Rich console for the conversation log.
     """
 
     def __init__(
         self,
-        api_key: str,
-        model: str,
+        provider: LLMProvider,
         dispatcher: ToolDispatcher,
+        vision: VisionProvider | None = None,
         extra_context: str | None = None,
         console: Console | None = None,
     ) -> None:
-        import anthropic
-
-        self._anthropic = anthropic
-        self._client = anthropic.Anthropic(
-            api_key=api_key,
-            timeout=REQUEST_TIMEOUT_SEC,
-            max_retries=2,
-        )
-        self._model = model
+        self._provider = provider
         self._dispatcher = dispatcher
+        self._vision = vision
         self._console = console or Console()
         self._system = system_blocks(extra_context)
         self._tools = tools_with_cache_breakpoint()
@@ -92,6 +87,10 @@ class Brain:
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
+
+    @property
+    def provider_name(self) -> str:
+        return self._provider.name
 
     def abort(self) -> None:
         """Abandon the current tool loop.
@@ -116,19 +115,18 @@ class Brain:
             self._trim()
 
             reply = BrainReply(text="")
-            for iteration in range(MAX_TOOL_ITERATIONS):
+            for _iteration in range(MAX_TOOL_ITERATIONS):
                 if self._abort.is_set():
                     reply.aborted = True
                     reply.text = ""
                     break
 
                 try:
-                    response = self._client.messages.create(
-                        model=self._model,
-                        max_tokens=MAX_TOKENS,
+                    response = self._provider.complete(
                         system=self._system,
                         tools=self._tools,
                         messages=self._messages,
+                        max_tokens=MAX_TOKENS,
                     )
                 except Exception as exc:
                     reply.error = self._describe_api_error(exc)
@@ -141,44 +139,34 @@ class Brain:
 
                 self._log_usage(response)
 
-                # Guard before touching content: a refusal carries no usable text.
                 if response.stop_reason == "refusal":
                     reply.text = "I can't help with that one."
-                    self._messages.append(
-                        {"role": "assistant", "content": reply.text}
-                    )
+                    self._messages.append({"role": "assistant", "content": reply.text})
                     return reply
 
                 self._messages.append({"role": "assistant", "content": response.content})
 
-                if response.stop_reason == "pause_turn":
-                    # A server-side tool paused; re-send to let it resume.
-                    continue
-
-                if response.stop_reason != "tool_use":
-                    reply.text = _collect_text(response.content)
+                if not response.tool_calls:
+                    reply.text = response.text
                     if response.stop_reason == "max_tokens" and not reply.text:
                         reply.text = "I ran long there. Ask me again more specifically."
                     self._trim()
                     return reply
 
-                tool_blocks = [
-                    block for block in response.content if getattr(block, "type", "") == "tool_use"
-                ]
                 results_content: list[dict[str, Any]] = []
-                for block in tool_blocks:
+                for call in response.tool_calls:
                     if self._abort.is_set():
                         results_content.append(
-                            _tool_result_block(
-                                block.id,
+                            self._tool_result(
+                                call.id,
                                 {"ok": False, "message": "Cancelled: the operator said stop."},
                             )
                         )
                         continue
-                    outcome = self._dispatcher.dispatch(block.name, block.input)
+                    outcome = self._dispatcher.dispatch(call.name, call.input)
                     reply.tool_calls.append(outcome)
                     results_content.append(
-                        _tool_result_block(block.id, outcome.payload, outcome.image_jpeg)
+                        self._tool_result(call.id, outcome.payload, outcome.image_jpeg)
                     )
 
                 # All tool results for one assistant turn go back in ONE user
@@ -192,42 +180,83 @@ class Brain:
                     reply.text = ""
                     break
             else:
-                reply.text = "That's taking more steps than I expected. What would you like me to do?"
+                reply.text = (
+                    "That's taking more steps than I expected. "
+                    "What would you like me to do?"
+                )
                 LOGGER.warning("Tool loop hit the %d iteration cap", MAX_TOOL_ITERATIONS)
 
             return reply
 
     # ------------------------------------------------------------------
 
+    def _tool_result(
+        self, tool_use_id: str, payload: dict[str, Any], image_jpeg: bytes | None = None
+    ) -> dict[str, Any]:
+        """Build a ``tool_result`` block, handling the image however this
+        provider needs it.
+
+        Failures come back as ordinary results with ``ok: false`` rather than
+        ``is_error``: the message is written to be spoken, and the model should
+        read it as data about the robot, not as a broken tool.
+        """
+        payload = dict(payload)
+
+        if image_jpeg and not self._provider.supports_images:
+            # Text-only model: the frame cannot go in, so a description does.
+            payload["image_description"] = self._describe_image(image_jpeg)
+            image_jpeg = None
+
+        content: list[dict[str, Any]] = [{"type": "text", "text": json.dumps(payload)}]
+        if image_jpeg:
+            content.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": base64.b64encode(image_jpeg).decode("ascii"),
+                    },
+                }
+            )
+        return {"type": "tool_result", "tool_use_id": tool_use_id, "content": content}
+
+    def _describe_image(self, image_jpeg: bytes) -> str:
+        """Turn a camera frame into words. Never raises."""
+        if self._vision is None:
+            return (
+                "A photo was captured but there is no way to interpret it. "
+                "Tell the operator you cannot see it."
+            )
+        try:
+            description = self._vision.describe(image_jpeg)
+        except Exception as exc:
+            LOGGER.warning("Vision provider failed", exc_info=True)
+            return (
+                "A photo was captured but the vision service failed "
+                f"({type(exc).__name__}). Tell the operator you could not see it."
+            )
+        self._console.print(f"[blue]vision[/blue] [dim]{description}[/dim]")
+        return description
+
     def _describe_api_error(self, exc: BaseException) -> str:
-        """Turn an SDK exception into one speakable sentence."""
-        anthropic = self._anthropic
-        if isinstance(exc, anthropic.APIConnectionError):
-            LOGGER.warning("Anthropic connection error: %s", exc)
-            return "I can't reach my language service right now, but safety commands still work."
-        if isinstance(exc, anthropic.RateLimitError):
-            LOGGER.warning("Anthropic rate limited")
-            return "I'm being rate limited. Give me a few seconds and ask again."
-        if isinstance(exc, anthropic.AuthenticationError):
-            LOGGER.error("Anthropic auth failed")
-            return "My language service rejected my key. Check the configuration."
-        if isinstance(exc, anthropic.APIStatusError):
-            LOGGER.error("Anthropic API error %s: %s", exc.status_code, exc)
-            return "My language service returned an error. Try again in a moment."
-        LOGGER.exception("Unexpected error talking to Anthropic")
+        """Turn a provider exception into one speakable sentence."""
+        described = self._provider.describe_error(exc)
+        if described is not None:
+            return described
+        LOGGER.exception("Unexpected error talking to %s", self._provider.name)
         return "Something went wrong on my side. Safety commands still work."
 
     def _log_usage(self, response: Any) -> None:
         """Log token usage, including whether the prompt cache is being hit."""
-        usage = getattr(response, "usage", None)
-        if usage is None:
-            return
+        usage = response.usage or {}
         LOGGER.info(
-            "anthropic in=%s out=%s cache_write=%s cache_read=%s stop=%s",
-            getattr(usage, "input_tokens", "?"),
-            getattr(usage, "output_tokens", "?"),
-            getattr(usage, "cache_creation_input_tokens", 0),
-            getattr(usage, "cache_read_input_tokens", 0),
+            "%s in=%s out=%s cache_write=%s cache_read=%s stop=%s",
+            self._provider.name,
+            usage.get("input", "?"),
+            usage.get("output", "?"),
+            usage.get("cache_write", "-"),
+            usage.get("cache_read", "-"),
             response.stop_reason,
         )
 
@@ -263,11 +292,11 @@ def _collect_text(content: Any) -> str:
 def _tool_result_block(
     tool_use_id: str, payload: dict[str, Any], image_jpeg: bytes | None = None
 ) -> dict[str, Any]:
-    """Build a ``tool_result`` block, attaching an image when the tool produced one.
+    """Build a ``tool_result`` block with a native image attachment.
 
-    Failures come back as ordinary results with ``ok: false`` rather than
-    ``is_error``: the message is written to be spoken, and the model should read
-    it as data about the robot, not as a broken tool.
+    Kept as a free function for the provider-independent tests; the Brain uses
+    :meth:`Brain._tool_result`, which additionally routes images through the
+    vision provider when the model cannot see them.
     """
     content: list[dict[str, Any]] = [{"type": "text", "text": json.dumps(payload)}]
     if image_jpeg:
