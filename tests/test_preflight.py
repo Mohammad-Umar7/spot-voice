@@ -219,3 +219,90 @@ def test_a_check_that_raises_does_not_take_down_the_report(monkeypatch):
     assert results[0].ok is False
     assert "boom" in results[0].detail
     assert results[1].ok is True  # the other check still ran
+
+
+# ----------------------------------------------------------------------
+# Finding the robot when its DHCP address moves
+
+
+@pytest.mark.parametrize(
+    "address,expected",
+    [
+        ("192.168.33.137", "192.168.33"),
+        ("192.168.80.3", "192.168.80"),
+        ("10.0.0.1", "10.0.0"),
+        ("not-an-ip", None),
+        ("192.168.33", None),
+        ("192.168.33.999", None),
+        ("", None),
+    ],
+)
+def test_subnet_is_derived_only_from_a_real_ipv4(address, expected):
+    from spot_voice.preflight import subnet_of
+
+    assert subnet_of(address) == expected
+
+
+def test_the_sweep_covers_the_whole_usable_range(monkeypatch):
+    from spot_voice.preflight import find_robots
+
+    probed = []
+
+    def record(host, _port, timeout=0.0):
+        probed.append(host)
+        return False, "no"
+
+    monkeypatch.setattr(preflight, "can_reach", record)
+    find_robots("192.168.33", workers=8)
+
+    assert len(probed) == 254
+    assert "192.168.33.1" in probed
+    assert "192.168.33.254" in probed
+    assert "192.168.33.0" not in probed  # network address
+    assert "192.168.33.255" not in probed  # broadcast
+
+
+def test_results_come_back_in_numeric_not_lexical_order(monkeypatch):
+    from spot_voice.preflight import find_robots
+
+    live = {"192.168.33.137", "192.168.33.9", "192.168.33.80"}
+    monkeypatch.setattr(
+        preflight,
+        "can_reach",
+        lambda host, _port, timeout=0.0: (host in live, ""),
+    )
+
+    # Lexical sorting would put .137 before .80, which reads as wrong.
+    assert find_robots("192.168.33", workers=8) == [
+        "192.168.33.9",
+        "192.168.33.80",
+        "192.168.33.137",
+    ]
+
+
+def test_an_empty_sweep_is_not_an_error(monkeypatch):
+    from spot_voice.preflight import find_robots
+
+    monkeypatch.setattr(preflight, "can_reach", lambda *a, **k: (False, ""))
+    assert find_robots("192.168.33", workers=4) == []
+
+
+def test_certificate_hints_identify_a_spot():
+    from spot_voice.preflight import looks_like_spot
+
+    assert looks_like_spot("Boston Dynamics, spot-BD-1347000") is True
+    assert looks_like_spot("BOSDYN internal CA") is True
+    assert looks_like_spot("TP-Link Router, admin") is False
+    assert looks_like_spot(None) is False
+    assert looks_like_spot("") is False
+
+
+def test_tls_identity_returns_none_rather_than_raising(monkeypatch):
+    # A host that refuses the handshake must not take the sweep down.
+    from spot_voice.preflight import tls_identity
+
+    def refuse(*_args, **_kwargs):
+        raise ConnectionResetError
+
+    monkeypatch.setattr(socket, "create_connection", refuse)
+    assert tls_identity("192.168.33.1") is None

@@ -210,6 +210,115 @@ def check_map(config) -> Check:
     return Check("map", True, f"graph found, {count} waypoint snapshots")
 
 
+# ----------------------------------------------------------------------
+# Finding the robot
+# ----------------------------------------------------------------------
+
+#: Timeout per host when sweeping a subnet. Short, because 254 of them run.
+SCAN_TIMEOUT_SEC = 0.6
+#: Concurrent probes. High enough to finish in seconds, low enough to be polite.
+SCAN_WORKERS = 64
+
+
+def subnet_of(address: str) -> str | None:
+    """Return the ``a.b.c`` prefix of an IPv4 address, or ``None``.
+
+    Args:
+        address: Something like ``192.168.33.137``.
+    """
+    parts = _host_of(address).split(".")
+    if len(parts) != 4:
+        return None
+    try:
+        numbers = [int(part) for part in parts]
+    except ValueError:
+        return None
+    if not all(0 <= number <= 255 for number in numbers):
+        return None
+    return ".".join(parts[:3])
+
+
+def find_robots(
+    subnet: str,
+    port: int = SPOT_API_PORT,
+    timeout: float = SCAN_TIMEOUT_SEC,
+    workers: int = SCAN_WORKERS,
+) -> list[str]:
+    """Sweep a /24 for hosts answering on Spot's API port.
+
+    Spot's address is handed out by DHCP on the facility wifi, so it moves. This
+    turns "which address is it today" into a few seconds of waiting instead of a
+    debugging session.
+
+    Args:
+        subnet: The ``a.b.c`` prefix to sweep.
+        port: Port to probe. Defaults to Spot's API port.
+        timeout: Per-host connect timeout.
+        workers: How many probes to run at once.
+
+    Returns:
+        Addresses that accepted a connection, in numeric order.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    candidates = [f"{subnet}.{host}" for host in range(1, 255)]
+
+    def probe(address: str) -> str | None:
+        reachable, _detail = can_reach(address, port, timeout=timeout)
+        return address if reachable else None
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        found = [result for result in pool.map(probe, candidates) if result]
+    return sorted(found, key=lambda address: int(address.rsplit(".", 1)[1]))
+
+
+#: Strings in a TLS certificate that suggest the host really is a Spot rather
+#: than a router or a printer that also happens to answer on 443.
+SPOT_CERT_HINTS = ("boston", "bosdyn", "spot")
+
+
+def tls_identity(host: str, port: int = SPOT_API_PORT, timeout: float = 2.0) -> str | None:
+    """Read identifying text out of a host's TLS certificate.
+
+    Spot presents a self-signed certificate, so this deliberately does not
+    verify it -- the goal is identification, not trust. Nothing is sent and no
+    credentials are involved; it is the handshake and then a disconnect.
+
+    Returns:
+        A short printable summary of the certificate's names, or ``None``.
+    """
+    import ssl
+
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as raw:
+            with context.wrap_socket(raw, server_hostname=host) as tls:
+                der = tls.getpeercert(binary_form=True)
+    except Exception:
+        return None
+    if not der:
+        return None
+
+    # The certificate is DER, so rather than pull in an X.509 parser just
+    # recover the printable runs -- which is where the subject and issuer names
+    # live -- and show them. Crude, but it needs no dependency and the operator
+    # only has to recognise the name.
+    text = "".join(chr(byte) if 32 <= byte < 127 else "\n" for byte in der)
+    tokens = [token.strip() for token in text.split("\n") if len(token.strip()) >= 4]
+    unique = list(dict.fromkeys(tokens))
+    return ", ".join(unique)[:120] or None
+
+
+def looks_like_spot(identity: str | None) -> bool:
+    """True when a certificate summary mentions Boston Dynamics or Spot."""
+    if not identity:
+        return False
+    lowered = identity.lower()
+    return any(hint in lowered for hint in SPOT_CERT_HINTS)
+
+
 #: Every check, in the order they are worth reading.
 ALL_CHECKS = (
     check_robot,

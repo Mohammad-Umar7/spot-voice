@@ -184,7 +184,7 @@ Everything lives in `.env`. Nothing is hardcoded and `.env` is gitignored.
 | Variable | What it does |
 |---|---|
 | `MOCK_ROBOT` | `true` simulates the robot; `false` drives a real Spot |
-| `SPOT_IP` | Spot's address. `192.168.33.180` on the `Bridge Training` wifi |
+| `SPOT_IP` | Spot's address. `192.168.33.137` on the `Bridge Training` wifi |
 | `BOSDYN_CLIENT_USERNAME` / `BOSDYN_CLIENT_PASSWORD` | read by the Spot SDK itself; this project never touches them |
 | `GRAPH_PATH` | folder containing `graph`, `waypoint_snapshots/`, `edge_snapshots/` |
 | `DOCK_ID` | dock fiducial id; blank if there is no dock |
@@ -314,7 +314,7 @@ have Claude describe your actual site.
 
 **The normal case is simple: join `Bridge Training`, same as the robot.**
 
-Spot lives at **`192.168.33.180`** on that wifi. If `Bridge Training` has
+Spot lives at **`192.168.33.137`** on that wifi (per its own tablet). If `Bridge Training` has
 internet, one interface reaches both the robot and the model API and there is
 nothing else to configure.
 
@@ -325,7 +325,7 @@ python -m spot_voice --check
 ```
 
 ```
-PASS  robot        192.168.33.180:443 reachable
+PASS  robot        192.168.33.137:443 reachable
 PASS  robot login  credentials present
 PASS  model api    anthropic (claude-sonnet-4-6): api.anthropic.com:443 reachable
 PASS  microphone   USB Audio Device
@@ -334,9 +334,30 @@ PASS  map          graph found, 214 waypoint snapshots
 
 That runs real TCP connects, not guesses, and needs no credentials.
 
-> **`192.168.33.180` looks like a DHCP address**, so it can move when the robot
-> reboots. If the robot goes unreachable, re-run `--check` before debugging
-> anything else. Worth asking for a DHCP reservation if it moves often.
+> **The address is DHCP-assigned and it moves.** The robot's tablet, under
+> **MY ROBOTS**, is the authoritative source — it lists the robot with its
+> current address and a green dot when connected. Worth asking for a DHCP
+> reservation so it stops moving.
+
+### When the address has moved
+
+```bash
+python -m spot_voice --find-robot
+```
+
+Sweeps the subnet, then reads each responding host's TLS certificate to say
+which one is actually a Spot — plenty of other kit answers on port 443:
+
+```
+  192.168.33.103  not a Spot
+      cert: Festo Didactic SE, Festo NetLab Root CA, For test purposes only
+  192.168.33.137  looks like a Spot
+      cert: Boston Dynamics, spot-BD-1347000
+```
+
+Nothing is sent and no credentials are involved — it is a TLS handshake and a
+disconnect. If nothing presents a Boston Dynamics certificate, the robot is
+powered off or on a different network than the laptop.
 
 ### If you are on Spot's own access point instead
 
@@ -584,7 +605,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-304 tests, no robot and no API key required. They cover:
+315 tests, no robot and no API key required. They cover:
 
 - the reflex matcher: stop words, transcription slips, and the false positives it
   must *not* fire on
@@ -604,7 +625,8 @@ python -m pytest
   image block never reaches a text-only provider
 - dock state gating motion, and manual mode's command parsing
 - the pre-flight checks, including that a check which raises reports itself
-  rather than taking the whole report down
+  rather than taking the whole report down, and the subnet sweep that finds the
+  robot when its DHCP address moves
 
 Where the Spot SDK is installed, an extra set checks that every `bosdyn` symbol
 the real client uses still resolves — so an SDK rename shows up here rather than

@@ -518,6 +518,69 @@ def print_preflight(config: Config, console: Console) -> int:
     return 1
 
 
+def print_find_robot(config: Config, console: Console) -> int:
+    """Sweep the configured subnet for anything answering on Spot's API port."""
+    from .preflight import SPOT_API_PORT, find_robots, subnet_of
+
+    subnet = subnet_of(config.spot_ip)
+    if subnet is None:
+        console.print(
+            f"[red]Can't work out a subnet from SPOT_IP={config.spot_ip!r}.[/red] "
+            "Set it to any address on the robot's network first."
+        )
+        return 2
+
+    console.print(
+        f"Sweeping [bold]{subnet}.1-254[/bold] for anything listening on port "
+        f"{SPOT_API_PORT}...\n"
+    )
+    found = find_robots(subnet)
+
+    if not found:
+        console.print(
+            "[yellow]Nothing found.[/yellow] Check you are on the same wifi as the "
+            "robot and that it is powered on."
+        )
+        return 1
+
+    from .preflight import looks_like_spot, tls_identity
+
+    likely: list[str] = []
+    for address in found:
+        identity = tls_identity(address)
+        is_spot = looks_like_spot(identity)
+        if is_spot:
+            likely.append(address)
+        label = "[green]looks like a Spot[/green]" if is_spot else "[dim]not a Spot[/dim]"
+        current = " [green](SPOT_IP in .env)[/green]" if address == config.spot_ip else ""
+        console.print(f"  [bold]{address}[/bold]{current}  {label}")
+        if identity:
+            console.print(f"      [dim]cert: {identity}[/dim]")
+
+    if likely:
+        console.print(
+            f"\nSet [bold]SPOT_IP={likely[0]}[/bold] in .env if that matches the "
+            "tablet."
+        )
+    else:
+        console.print(
+            "\n[yellow]None of these presented a Boston Dynamics certificate.[/yellow] "
+            "The robot may be powered off, or on a different network than this "
+            "laptop."
+        )
+    console.print(
+        "[dim]The robot's tablet, under MY ROBOTS, is the authoritative source -- "
+        "match against that.[/dim]"
+    )
+    if config.spot_ip not in found:
+        console.print(
+            f"\n[yellow]SPOT_IP is currently {config.spot_ip}, which did not "
+            "answer.[/yellow] Update it in .env to whichever address above the "
+            "tablet shows."
+        )
+    return 0
+
+
 def print_banner(config: Config, console: Console) -> None:
     """Startup summary, including the safety posture."""
     table = Table.grid(padding=(0, 2))
@@ -589,6 +652,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "microphone? Run this before a demo.",
     )
     parser.add_argument(
+        "--find-robot",
+        action="store_true",
+        help="sweep SPOT_IP's subnet for the robot. Use when its DHCP address "
+        "has moved and you need to find it again.",
+    )
+    parser.add_argument(
         "--manual",
         action="store_true",
         help="type tool commands straight at the robot; no speech, no Claude, "
@@ -615,6 +684,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     setup_logging(config.log_level)
+
+    if args.find_robot:
+        return print_find_robot(config, CONSOLE)
 
     if args.check:
         return print_preflight(config, CONSOLE)
