@@ -312,6 +312,12 @@ class SpotClient(RobotInterface):
             )
         velocity, duration, human = plan
 
+        # Same guard as stand(): standing up while sitting on the dock is not a
+        # thing to attempt. Claude has the undock tool and this message tells it
+        # what to do, so "walk forward" while docked becomes undock then walk.
+        if self.is_docked():
+            return fail("I'm on the dock. Ask me to undock first.")
+
         # Stand before walking. A velocity command issued from a sit is not
         # reliably honoured, and standing first is what the operator expects.
         from bosdyn.client.robot_command import blocking_stand

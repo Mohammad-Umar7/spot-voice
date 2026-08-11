@@ -172,6 +172,9 @@ class MockSpot(RobotInterface):
             )
         velocity, duration, human = plan
 
+        if self._docked:
+            return fail("I'm on the dock. Ask me to undock first.")
+
         with self._lock:
             if not self._standing:
                 self._log("not standing yet -> standing first")
@@ -215,8 +218,13 @@ class MockSpot(RobotInterface):
             return fail(
                 f"I don't know a place called {waypoint_name}. I know: " + ", ".join(names) + "."
             )
+        # "Go to X" is unambiguous about wanting to leave the dock, so this one
+        # undocks itself rather than making the operator ask twice. Must match
+        # SpotClient.navigate_to, or mock mode mispredicts the real robot.
         if self._docked:
-            return fail("I'm on the dock. Ask me to undock first.")
+            undocked = self.undock()
+            if not undocked.ok:
+                return undocked
 
         self._log(f"upload graph -> localize on fiducial -> navigate_to({match})")
         self._standing = True
