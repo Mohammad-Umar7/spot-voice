@@ -181,7 +181,9 @@ TOOLS: list[dict[str, Any]] = [
         "name": "undock",
         "description": (
             "Power on and step off the charging dock into a standing pose. "
-            "Needed before any movement when Spot starts the session docked."
+            "Needed before any movement when Spot starts the session docked. "
+            "If Spot is not on the dock this reports that and does nothing -- "
+            "call stand instead to get it on its feet."
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },

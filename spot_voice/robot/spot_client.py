@@ -473,7 +473,7 @@ class SpotClient(RobotInterface):
         except Exception as exc:
             return fail(to_speakable(exc))
         if dock_id is None:
-            return ok("I'm not on the dock.")
+            return ok("I'm not on the dock. Say stand if you want me up.")
         try:
             self._call("power on", self._power_on_if_needed)
             self._call("undock", lambda: blocking_go_to_prep_pose(self._robot, dock_id))

@@ -267,7 +267,7 @@ class MockSpot(RobotInterface):
 
     def undock(self) -> ActionResult:
         if not self._docked:
-            return ok("I'm not on the dock.")
+            return ok("I'm not on the dock. Say stand if you want me up.")
         self._log("power on -> blocking_go_to_prep_pose")
         time.sleep(0.8)
         with self._lock:

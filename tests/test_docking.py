@@ -142,3 +142,40 @@ def test_stop_and_sit_are_never_gated_by_dock_state(docked: MockSpot):
     for phrase in ("stop", "sit down"):
         outcome = engine.handle(phrase)
         assert outcome is not None and outcome.ok, phrase
+
+
+# ----------------------------------------------------------------------
+# The "it's sitting on the floor near me" case
+
+
+def test_undock_off_the_dock_tells_you_what_to_say_instead(docked: MockSpot):
+    # Saying "undock" to a robot that is already off the dock is a dead end
+    # unless the message names the fix -- the operator gets nothing, and the
+    # model has nothing to chain to.
+    docked.undock()
+    again = docked.undock()
+
+    assert again.ok is True
+    assert "stand" in again.message.lower()
+
+
+def test_the_undock_tool_description_points_at_stand():
+    # Same nudge at the schema level, so the model picks the right tool the
+    # first time rather than learning from a failed call.
+    from spot_voice.brain.tools import TOOLS
+
+    undock = next(tool for tool in TOOLS if tool["name"] == "undock")
+    assert "stand" in undock["description"].lower()
+
+
+def test_stand_is_what_actually_gets_it_up_off_the_floor(dispatcher, docked: MockSpot):
+    dispatcher.dispatch("undock", {})  # now off the dock, standing
+    dispatcher.dispatch("sit", {})     # sitting on the floor, as if idle
+
+    before = dispatcher.dispatch("get_status", {}).payload
+    assert before["posture"] == "sitting"
+
+    assert dispatcher.dispatch("stand", {}).ok
+    after = dispatcher.dispatch("get_status", {}).payload
+    assert after["posture"] == "standing"
+    assert after["motor_power"] == "on"
