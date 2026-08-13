@@ -684,6 +684,101 @@ def run_vision_test(config: Config, console: Console) -> int:
     return 0
 
 
+def run_mic_test(config: Config, console: Console) -> int:
+    """Transcribe from the microphone and print timings. No robot involved.
+
+    Exists because every other way to hear a transcript also connects to Spot,
+    takes a lease and registers an e-stop -- far too much apparatus for
+    answering "is speech-to-text working, and is it fast enough". Nothing here
+    imports the robot layer at all.
+
+    The number to watch is the real-time factor: transcription time divided by
+    the length of the audio. Below 1.0 the transcriber is faster than the person
+    talking and the queue stays empty. Above it, utterances pile up and audio
+    starts being dropped, which is what made the robot appear to ignore people.
+    """
+    from .audio.listener import Listener
+    from .audio.stt import Transcriber, resolve_device
+
+    device, compute_type = resolve_device(config.whisper_device)
+    console.print(
+        f"Loading [bold]{config.whisper_model}[/bold] on "
+        f"[bold]{device}[/bold] ({compute_type})..."
+    )
+    if device == "cpu":
+        console.print(
+            "[yellow]Running on the CPU. If this machine has an NVIDIA GPU, "
+            "transcription there is roughly 20x faster.[/yellow]"
+        )
+
+    started = time.perf_counter()
+    try:
+        transcriber = Transcriber(
+            model_size=config.whisper_model,
+            language=config.stt_language,
+            device=config.whisper_device,
+        )
+    except Exception as exc:
+        console.print(f"[red]Could not load the model: {exc}[/red]")
+        return 1
+    console.print(
+        f"Ready in {time.perf_counter() - started:.1f}s on "
+        f"[bold]{transcriber.device}[/bold].\n"
+        "Speak into the mic. Ctrl-C to stop.\n"
+    )
+
+    stats: list[float] = []
+
+    def on_transcript(transcript) -> None:
+        factor = (
+            transcript.duration_ms / transcript.audio_ms
+            if transcript.audio_ms
+            else 0.0
+        )
+        stats.append(factor)
+        colour = "green" if factor < 1.0 else "yellow" if factor < 2.0 else "red"
+        console.print(
+            f"[bold cyan]heard:[/bold cyan] {transcript.text}\n"
+            f"  [dim]{transcript.audio_ms:.0f} ms audio, "
+            f"{transcript.duration_ms:.0f} ms to transcribe, "
+            f"[{colour}]{factor:.2f}x real time[/{colour}], "
+            f"no_speech={transcript.no_speech_prob:.2f} "
+            f"logprob={transcript.avg_logprob:.2f}[/dim]"
+        )
+
+    listener = Listener(
+        transcriber=transcriber,
+        on_transcript=on_transcript,
+        mic_name=config.mic_device_name,
+        console=console,
+    )
+    listener.start()
+    try:
+        while True:
+            time.sleep(0.3)
+    except KeyboardInterrupt:
+        console.print("\nStopping...")
+    finally:
+        listener.stop()
+
+    if stats:
+        worst = max(stats)
+        average = sum(stats) / len(stats)
+        console.print(
+            f"\n{len(stats)} utterance(s): {average:.2f}x real time on average, "
+            f"worst {worst:.2f}x."
+        )
+        if worst > 1.0:
+            console.print(
+                "[yellow]Slower than real time at least once. Utterances will "
+                "queue and audio will be dropped -- use a smaller model, or a "
+                "GPU.[/yellow]"
+            )
+        else:
+            console.print("[green]Comfortably faster than speech.[/green]")
+    return 0
+
+
 def run_enrollment(config: Config, name: str, console: Console) -> int:
     """Enroll a face from Spot's own camera.
 
@@ -867,6 +962,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "print what it says. Verifies the whole image path in isolation.",
     )
     parser.add_argument(
+        "--test-mic",
+        action="store_true",
+        help="transcribe from the microphone and report speed; no robot needed",
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
         help="pre-flight: can this laptop reach the robot, the model API and the "
@@ -917,6 +1017,9 @@ def main(argv: list[str] | None = None) -> int:
 
             return enroll_from_photos(args.enroll, config, CONSOLE, args.photos)
         return run_enrollment(config, args.enroll, CONSOLE)
+
+    if args.test_mic:
+        return run_mic_test(config, CONSOLE)
 
     if args.test_vision:
         return run_vision_test(config, CONSOLE)
