@@ -34,8 +34,22 @@ class GeminiVisionProvider(VisionProvider):
 
     name = "gemini"
 
+    #: What a Google AI Studio key looks like. Keys that do not start this way
+    #: are usually OAuth tokens or service-account credentials, which this SDK
+    #: does not accept -- worth saying plainly rather than failing at call time.
+    KEY_PREFIX = "AIza"
+
     def __init__(self, api_key: str, model: str) -> None:
         import google.generativeai as genai
+
+        if not api_key.startswith(self.KEY_PREFIX):
+            LOGGER.warning(
+                "GEMINI_API_KEY does not look like an AI Studio key (expected it "
+                "to start with %r, got %r...). Get one from "
+                "https://aistudio.google.com/apikey",
+                self.KEY_PREFIX,
+                api_key[:6],
+            )
 
         genai.configure(api_key=api_key)
         self._genai = genai
@@ -48,14 +62,45 @@ class GeminiVisionProvider(VisionProvider):
         Raises:
             RuntimeError: If the model returns nothing usable.
         """
-        response = self._model.generate_content(
-            [prompt, {"mime_type": "image/jpeg", "data": image_jpeg}]
-        )
+        try:
+            response = self._model.generate_content(
+                [prompt, {"mime_type": "image/jpeg", "data": image_jpeg}]
+            )
+        except Exception as exc:
+            raise RuntimeError(explain_gemini_error(exc)) from exc
+
         text = (getattr(response, "text", "") or "").strip()
         if not text:
             raise RuntimeError("Gemini returned no description")
         LOGGER.info("Gemini described a frame in %d characters", len(text))
         return text
+
+
+def explain_gemini_error(exc: BaseException) -> str:
+    """Turn a Gemini failure into something that names the actual fix.
+
+    Gemini's errors are famously opaque -- a bad key, a wrong model id and an
+    unenabled API all surface as similar-looking exceptions.
+    """
+    text = str(exc).lower()
+    if "api key not valid" in text or "api_key_invalid" in text:
+        return (
+            "Gemini rejected the API key. Get one from "
+            "https://aistudio.google.com/apikey -- it should start with 'AIza'."
+        )
+    if "permission" in text or "403" in text:
+        return (
+            "Gemini refused the request. The key may be for a different project, "
+            "or the Generative Language API may not be enabled on it."
+        )
+    if "not found" in text or "404" in text:
+        return (
+            "Gemini does not recognise that model id. Check GEMINI_MODEL against "
+            "https://ai.google.dev/gemini-api/docs/models"
+        )
+    if "quota" in text or "429" in text or "resource_exhausted" in text:
+        return "Gemini is rate limiting or the free quota is used up. Wait and retry."
+    return f"Gemini failed: {exc}"
 
 
 class NullVisionProvider(VisionProvider):

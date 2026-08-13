@@ -570,6 +570,69 @@ def print_preflight(config: Config, console: Console) -> int:
     return 1
 
 
+def run_vision_test(config: Config, console: Console) -> int:
+    """Send one image through the vision provider and print the description.
+
+    Isolates the image path from everything else. When "what do you see" gives a
+    poor answer, this says whether the problem is the vision model, the robot's
+    camera, or the tool-calling model -- which is three different fixes.
+    """
+    from pathlib import Path
+
+    from .brain.providers import build_vision_provider
+
+    image_path = Path(__file__).resolve().parent / "assets" / "test_scene.jpg"
+    if not image_path.exists():
+        console.print(f"[red]Test image missing: {image_path}[/red]")
+        return 1
+
+    console.print(
+        f"Vision provider: [bold]{config.vision_provider or 'none'}[/bold]"
+        + (f" ({config.gemini_model})" if config.vision_provider == "gemini" else "")
+    )
+
+    if config.vision_provider == "gemini" and not config.gemini_api_key.startswith("AIza"):
+        console.print(
+            f"\n[yellow]Heads up: GEMINI_API_KEY starts with "
+            f"{config.gemini_api_key[:6]!r}.[/yellow] Google AI Studio keys start "
+            "with 'AIza'. If this call fails, that is almost certainly why -- "
+            "get a key from https://aistudio.google.com/apikey\n"
+        )
+
+    vision = build_vision_provider(config)
+    if vision is None:
+        console.print(
+            "[green]The language model reads images itself; no separate vision "
+            "provider needed.[/green]"
+        )
+        return 0
+
+    console.print(f"Sending {image_path.name} ({image_path.stat().st_size} bytes)...\n")
+    try:
+        description = vision.describe(image_path.read_bytes())
+    except Exception as exc:
+        console.print(f"[bold red]Vision failed:[/bold red] {exc}")
+        console.print(
+            "\n[dim]Fallback: set VISION_PROVIDER=none and Spot will say it "
+            "cannot see the photo rather than inventing one.[/dim]"
+        )
+        return 1
+
+    console.print(f"[bold green]It says:[/bold green] {description}\n")
+    if "no vision model is configured" in description:
+        console.print(
+            "[yellow]That is the placeholder, not a real description -- no vision "
+            "provider is actually wired up.[/yellow]"
+        )
+        return 1
+    console.print(
+        "[dim]The image is a synthetic facility scene: gauges, a hazard sign, a "
+        "cabinet, a pallet, a spill. If the description matches, the image path "
+        "works end to end.[/dim]"
+    )
+    return 0
+
+
 def run_enrollment(config: Config, name: str, console: Console) -> int:
     """Enroll a face from Spot's own camera.
 
@@ -739,6 +802,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--forget", metavar="NAME", help="remove an enrolled face and exit"
     )
     parser.add_argument(
+        "--test-vision",
+        action="store_true",
+        help="send one test image through the configured vision provider and "
+        "print what it says. Verifies the whole image path in isolation.",
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
         help="pre-flight: can this laptop reach the robot, the model API and the "
@@ -785,6 +854,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.enroll:
         return run_enrollment(config, args.enroll, CONSOLE)
+
+    if args.test_vision:
+        return run_vision_test(config, CONSOLE)
 
     if args.find_robot:
         return print_find_robot(config, CONSOLE)
