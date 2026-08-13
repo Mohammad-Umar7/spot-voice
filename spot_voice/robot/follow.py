@@ -483,6 +483,8 @@ class FollowController:
         self._ready = threading.Event()
         self._lock = threading.Lock()
         self._error: str | None = None
+        #: Detector kept for locate_operator() when the follow thread is idle.
+        self._standalone_detector: PersonDetector | None = None
 
     # ------------------------------------------------------------------
 
@@ -565,6 +567,43 @@ class FollowController:
         except Exception as exc:
             LOGGER.warning("Face recognition unavailable (%s)", exc, exc_info=True)
             return None, None
+
+    def locate_operator(self) -> tuple[float, float] | None:
+        """One-shot "where is the person", as ``(bearing_deg, distance_m)``.
+
+        Used by the come-here commands. Deliberately routed through this class
+        rather than given its own detector: it then finds the operator by
+        exactly the same rules follow-me uses, face recognition included, so
+        "come here" and "follow me" cannot disagree about who you are.
+
+        Returns ``None`` when nobody is visible. Builds the detector on the
+        calling thread if follow-me has never run, which costs a model load
+        once.
+        """
+        with self._lock:
+            detector = self._standalone_detector
+            if detector is None:
+                try:
+                    detector = self._detector_factory()
+                except Exception:
+                    LOGGER.warning("detector unavailable for locate", exc_info=True)
+                    return None
+                self._standalone_detector = detector
+
+        capture = self._robot.capture_image("front")
+        if not capture.ok or not capture.image_jpeg:
+            return None
+        boxes = detector.detect(capture.image_jpeg)
+        if not boxes:
+            return None
+
+        target = pick_target(boxes, detector.frame_size[0])
+        if target is None:
+            return None
+        distance = estimate_distance(target, detector.frame_size)
+        if distance is None:
+            return None
+        return bearing_to(target, detector.frame_size), distance
 
     def _steer(
         self,

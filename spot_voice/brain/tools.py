@@ -105,13 +105,47 @@ TOOLS: list[dict[str, Any]] = [
         "name": "go_where_pointed",
         "description": (
             "Look for the operator pointing, work out the direction, measure how "
-            "far the floor is clear that way, and walk there. Use this when they "
-            "say something like 'stand over there', 'go that way' or 'wait here' "
-            "while gesturing. Spot says what it understood before it moves, so a "
-            "misread is corrected rather than acted on blindly. If nobody is "
-            "pointing it says so -- ask them to hold their arm out and try again."
+            "far the floor is clear that way, and walk there. Use this only when "
+            "they mean somewhere AWAY from themselves and are gesturing at it: "
+            "'stand over there', 'go that way', 'wait by the door'. Requires an "
+            "outstretched arm; if nobody is pointing it says so. For anywhere "
+            "near the operator themselves -- 'come here', 'sit beside me' -- use "
+            "come_here instead, which needs no gesture."
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "come_here",
+        "description": (
+            "Walk to the operator and settle next to them. Use for 'come here', "
+            "'sit here', 'stand beside me', 'come to me' -- anything naming a "
+            "spot at the person rather than away from them. No pointing gesture "
+            "is needed: Spot finds the operator with its camera, so their arms "
+            "can be full. Spot says what it understood before it moves."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "position": {
+                    "type": "string",
+                    "enum": ["in_front", "beside"],
+                    "description": (
+                        "'beside' for 'beside me' or 'next to me' -- ends up "
+                        "alongside them. 'in_front' for a plain 'come here' -- "
+                        "ends up facing them. Defaults to in_front."
+                    ),
+                },
+                "posture": {
+                    "type": "string",
+                    "enum": ["stand", "sit"],
+                    "description": (
+                        "What to do on arrival. 'sit' for 'sit here' or 'sit "
+                        "beside me'. Defaults to stand."
+                    ),
+                },
+            },
+            "required": [],
+        },
     },
     {
         "name": "navigate_to",
@@ -310,7 +344,14 @@ COMPACT_DESCRIPTIONS: dict[str, str] = {
         f"{MAX_MOVE_DISTANCE_M}), degrees for turns. For travelling somewhere "
         "named, use navigate_to."
     ),
-    "go_where_pointed": "Walk where the operator is pointing. Use for 'over there' or 'that way'.",
+    "go_where_pointed": (
+        "Walk where the operator points. Only for somewhere away from them: "
+        "'over there', 'that way'. Needs an outstretched arm."
+    ),
+    "come_here": (
+        "Walk to the operator and stop by them. For 'come here', 'sit here', "
+        "'stand beside me'. No gesture needed."
+    ),
     "navigate_to": "Walk to a named map waypoint. Use list_waypoints if unsure of the name.",
     "list_waypoints": "Names of places on the map.",
     "start_follow": "Start following the operator. Tell them to stand in front of you.",

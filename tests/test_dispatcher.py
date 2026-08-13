@@ -188,3 +188,120 @@ def test_a_raising_robot_becomes_a_failed_result(dispatcher):
     result = broken.dispatch("stop_all", {})
     assert result.ok is False
     assert "connection" in result.payload["message"].lower()
+
+
+# ----------------------------------------------------------------------
+# come_here: the counterpart to go_where_pointed
+#
+# go_where_pointed needs an outstretched arm because it targets somewhere away
+# from the person. come_here needs no gesture, because the person is the target.
+
+
+class LocatingFollow(FakeFollow):
+    """A follow controller that can say where the operator is."""
+
+    def __init__(self, located=(0.0, 4.0)) -> None:
+        super().__init__()
+        self.located = located
+        self.locate_calls = 0
+
+    def locate_operator(self):
+        self.locate_calls += 1
+        return self.located
+
+
+def _dispatcher_with(follow, robot):
+    spoken: list[str] = []
+    instance = ToolDispatcher(
+        robot=robot, follow=follow, speak=spoken.append, console=QUIET
+    )
+    instance.spoken = spoken  # type: ignore[attr-defined]
+    return instance
+
+
+def test_come_here_finds_the_operator_and_walks_without_any_gesture(robot):
+    follow = LocatingFollow(located=(0.0, 4.0))
+    dispatcher = _dispatcher_with(follow, robot)
+
+    result = dispatcher.dispatch("come_here", {})
+
+    assert result.ok
+    assert follow.locate_calls == 1
+    assert robot.last_goal is not None, "should have issued a trajectory goal"
+
+
+def test_come_here_announces_before_it_moves(robot):
+    """It walks toward a person, so the interpretation is voiced first."""
+    dispatcher = _dispatcher_with(LocatingFollow(located=(0.0, 4.0)), robot)
+
+    dispatcher.dispatch("come_here", {})
+
+    assert dispatcher.spoken, "nothing was said before moving toward a person"
+
+
+def test_sit_beside_me_ends_up_alongside_and_sitting(robot):
+    dispatcher = _dispatcher_with(LocatingFollow(located=(0.0, 3.0)), robot)
+
+    result = dispatcher.dispatch(
+        "come_here", {"position": "beside", "posture": "sit"}
+    )
+
+    assert result.ok
+    assert "Sitting" in result.payload["message"]
+    bearing, _distance, _standoff = robot.last_goal
+    # Alongside means off the centre line, not straight at them.
+    assert abs(bearing) > 5.0
+
+
+def test_come_here_stops_following_first(robot):
+    follow = LocatingFollow(located=(0.0, 3.0))
+    follow._active = True
+    dispatcher = _dispatcher_with(follow, robot)
+
+    dispatcher.dispatch("come_here", {})
+
+    assert follow.stopped == 1
+
+
+def test_come_here_says_so_when_it_cannot_see_anyone(robot):
+    follow = LocatingFollow(located=None)
+    dispatcher = _dispatcher_with(follow, robot)
+
+    result = dispatcher.dispatch("come_here", {})
+
+    assert result.ok is False
+    assert "can't see you" in result.payload["message"]
+    assert robot.last_goal is None, "must not walk toward a guess"
+
+
+def test_come_here_refuses_an_implausible_distance_rather_than_setting_off(robot):
+    from spot_voice.vision.proxemics import MAX_APPROACH_M
+
+    follow = LocatingFollow(located=(0.0, MAX_APPROACH_M + 5))
+    dispatcher = _dispatcher_with(follow, robot)
+
+    result = dispatcher.dispatch("come_here", {})
+
+    assert result.ok is False
+    assert robot.last_goal is None
+
+
+def test_a_broken_locator_is_reported_not_raised(robot):
+    class ExplodingFollow(FakeFollow):
+        def locate_operator(self):
+            raise RuntimeError("camera fell off")
+
+    result = _dispatcher_with(ExplodingFollow(), robot).dispatch("come_here", {})
+
+    assert result.ok is False
+    assert "RuntimeError" in result.payload["message"]
+
+
+def test_garbage_arguments_fall_back_to_sensible_defaults(robot):
+    dispatcher = _dispatcher_with(LocatingFollow(located=(0.0, 3.0)), robot)
+
+    result = dispatcher.dispatch(
+        "come_here", {"position": "sideways-ish", "posture": "cartwheel"}
+    )
+
+    assert result.ok  # not a crash, and not a cartwheel

@@ -21,6 +21,7 @@ EXPECTED_TOOLS = {
     "sit",
     "move",
     "go_where_pointed",
+    "come_here",
     "navigate_to",
     "list_waypoints",
     "start_follow",

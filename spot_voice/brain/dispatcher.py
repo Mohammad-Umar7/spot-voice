@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 from rich.console import Console
 
-from ..robot.base import ActionResult, RobotInterface, fail
+from ..robot.base import ActionResult, RobotInterface, fail, ok
 from ..robot.errors import to_speakable
 from .tools import TOOL_NAMES
 
@@ -91,6 +91,7 @@ class ToolDispatcher:
             "emote": self._emote,
             "move": self._move,
             "go_where_pointed": self._go_where_pointed,
+            "come_here": self._come_here,
             "navigate_to": self._navigate_to,
             "list_waypoints": self._list_waypoints,
             "start_follow": self._start_follow,
@@ -197,6 +198,100 @@ class ToolDispatcher:
             degrees=_as_number(arguments.get("degrees")),
             speed=_as_number(arguments.get("speed")),
         )
+
+    def _come_here(self, arguments: dict[str, Any]) -> ActionResult:
+        """Walk to the operator and settle beside or in front of them.
+
+        The counterpart to :meth:`_go_where_pointed`. That one needs a gesture
+        because it targets somewhere away from the person; this one needs none,
+        because the person *is* the target and their own body is the reference.
+
+        Walking toward a person is the one direction worth being careful in, so
+        there are four guards: the approach stops a conversational distance
+        short rather than at them, an implausible distance estimate is refused
+        outright instead of walked, Spot says what it understood before moving,
+        and Spot's own obstacle avoidance treats the person as an obstacle
+        regardless of any of the above.
+        """
+        from ..vision.proxemics import MAX_APPROACH_M, approach_person
+
+        position = str(arguments.get("position") or "in_front").strip().lower()
+        posture = str(arguments.get("posture") or "stand").strip().lower()
+        if position not in {"in_front", "beside"}:
+            position = "in_front"
+        if posture not in {"stand", "sit"}:
+            posture = "stand"
+
+        if self._follow is not None and self._follow.active:
+            self._follow.stop()
+
+        if self._follow is None:
+            return fail("I can't look for you right now -- my person detector isn't set up.")
+        try:
+            located = self._follow.locate_operator()
+        except Exception as exc:
+            LOGGER.warning("locate_operator failed", exc_info=True)
+            return fail(f"I couldn't look for you. {type(exc).__name__}.")
+
+        if located is None:
+            return fail(
+                "I can't see you. Stand where I'm facing and ask again, or tell "
+                "me where to go instead."
+            )
+
+        bearing_deg, distance_m = located
+        plan = approach_person(bearing_deg, distance_m, position=position)
+        if plan is None:
+            return fail(
+                f"I think you're more than {MAX_APPROACH_M:.0f} metres away, which "
+                "is too far for me to judge accurately. Come closer or point "
+                "where you want me."
+            )
+
+        # Say it before doing it. This walks toward a person, so an operator who
+        # hears the wrong interpretation needs the chance to say stop first.
+        if self._speak is not None:
+            try:
+                self._speak(plan.summary)
+            except Exception:
+                LOGGER.debug("could not announce the approach", exc_info=True)
+
+        if not plan.already_there:
+            moved = self._walk_to(plan)
+            if not moved.ok:
+                return moved
+
+        if posture == "sit":
+            settled = self._robot.sit()
+            return settled if not settled.ok else ok(f"{plan.summary} Sitting.")
+        return ok(plan.summary)
+
+    def _walk_to(self, plan) -> ActionResult:
+        """Drive one approach, preferring a trajectory goal over a blind walk.
+
+        ``walk_toward`` hands the goal to Spot's own planner, which routes round
+        anything in the way. The turn-then-walk fallback cannot do that, so it
+        is only used when the robot has no trajectory support.
+        """
+        try:
+            if self._robot.walk_toward(
+                plan.bearing_deg, plan.distance_m, plan.standoff_m
+            ):
+                return ok("On my way.")
+        except Exception:
+            LOGGER.debug("walk_toward failed; falling back", exc_info=True)
+
+        if abs(plan.bearing_deg) >= 8:
+            turn = self._robot.move(
+                direction="turn_left" if plan.bearing_deg > 0 else "turn_right",
+                degrees=abs(plan.bearing_deg),
+            )
+            if not turn.ok:
+                return turn
+        remaining = max(0.0, plan.distance_m - plan.standoff_m)
+        if remaining < 0.1:
+            return ok("Close enough.")
+        return self._robot.move(direction="forward", distance_m=remaining)
 
     def _go_where_pointed(self, _arguments: dict[str, Any]) -> ActionResult:
         """Read a pointing gesture, measure the distance, and walk there.
