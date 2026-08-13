@@ -833,6 +833,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="record your face so follow-me looks for you specifically, then exit",
     )
     parser.add_argument(
+        "--photos",
+        metavar="PATH",
+        help=(
+            "enroll from a folder of photos instead of the robot's camera "
+            "(use with --enroll NAME); no robot needed"
+        ),
+    )
+    parser.add_argument(
         "--forget", metavar="NAME", help="remove an enrolled face and exit"
     )
     parser.add_argument(
@@ -887,6 +895,10 @@ def main(argv: list[str] | None = None) -> int:
         return forget(args.forget, config, CONSOLE)
 
     if args.enroll:
+        if args.photos:
+            from .enroll import enroll_from_photos
+
+            return enroll_from_photos(args.enroll, config, CONSOLE, args.photos)
         return run_enrollment(config, args.enroll, CONSOLE)
 
     if args.test_vision:

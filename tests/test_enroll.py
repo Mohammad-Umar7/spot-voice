@@ -92,3 +92,106 @@ def test_a_nameless_enrolment_is_refused_before_touching_the_robot(config):
 def test_enrolment_without_a_robot_refuses_rather_than_using_a_webcam(config):
     """A webcam sample would enrol fine and then fail to match Spot's fisheye."""
     assert enroll("awaiz", config, QUIET, None) == 2
+
+
+# ----------------------------------------------------------------------
+# Choosing which face in the frame is the subject
+#
+# Refusing whenever a second face appeared was the original rule and it did not
+# survive a real workplace: colleagues walked through shot, four of five samples
+# were discarded, and the identity ended up built from one frame -- exactly the
+# brittleness the five prompts exist to prevent.
+
+
+def _face(box, embedding):
+    return (box, embedding)
+
+
+ME = [1.0, 0.0, 0.0]
+SOMEONE_ELSE = [0.0, 1.0, 0.0]
+
+
+def test_a_lone_face_is_taken():
+    from spot_voice.enroll import pick_subject
+
+    chosen, _ = pick_subject([_face((0, 0, 100, 100), ME)])
+    assert chosen is not None
+
+
+def test_the_near_face_wins_because_the_subject_stands_closest():
+    from spot_voice.enroll import pick_subject
+
+    near = _face((0, 0, 200, 200), ME)          # a metre away
+    far = _face((400, 0, 450, 50), SOMEONE_ELSE)  # across the room
+
+    chosen, _ = pick_subject([far, near])
+    assert chosen == near
+
+
+def test_two_faces_at_the_same_distance_are_refused_not_guessed():
+    """Genuinely ambiguous, and enrolling the wrong person is unrecoverable."""
+    from spot_voice.enroll import pick_subject
+
+    chosen, reason = pick_subject(
+        [_face((0, 0, 200, 200), ME), _face((300, 0, 495, 195), SOMEONE_ELSE)]
+    )
+    assert chosen is None
+    assert "same distance" in reason
+
+
+def test_once_one_sample_is_accepted_later_frames_must_match_it():
+    """The guard that makes picking-by-size safe: a wrong pick cannot stick."""
+    from spot_voice.enroll import pick_subject
+
+    # A closer stranger would otherwise win on size alone.
+    stranger_up_close = _face((0, 0, 400, 400), SOMEONE_ELSE)
+    me_further_back = _face((400, 0, 500, 100), ME)
+
+    chosen, _ = pick_subject([stranger_up_close, me_further_back], anchor=ME)
+    assert chosen == me_further_back
+
+
+def test_a_frame_without_the_anchored_person_is_skipped():
+    from spot_voice.enroll import pick_subject
+
+    chosen, reason = pick_subject([_face((0, 0, 200, 200), SOMEONE_ELSE)], anchor=ME)
+    assert chosen is None
+    assert "same person" in reason
+
+
+def test_two_faces_both_matching_the_anchor_are_refused():
+    from spot_voice.enroll import pick_subject
+
+    chosen, reason = pick_subject(
+        [_face((0, 0, 200, 200), ME), _face((300, 0, 400, 100), ME)], anchor=ME
+    )
+    assert chosen is None
+    assert "both look like you" in reason
+
+
+# ----------------------------------------------------------------------
+# Enrolling from photos
+
+
+def test_a_missing_photo_folder_is_reported(config):
+    from spot_voice.enroll import enroll_from_photos
+
+    assert enroll_from_photos("awaiz", config, QUIET, "/nope/not/here") == 2
+
+
+def test_a_folder_with_no_images_is_reported(config, tmp_path):
+    from spot_voice.enroll import enroll_from_photos
+
+    (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
+    assert enroll_from_photos("awaiz", config, QUIET, tmp_path) == 2
+
+
+def test_photo_enrolment_takes_no_robot_argument_at_all(config):
+    """The whole point: no connection, no lease, no robot in the room."""
+    import inspect
+
+    from spot_voice.enroll import enroll_from_photos
+
+    parameters = inspect.signature(enroll_from_photos).parameters
+    assert "robot" not in parameters
+    assert list(parameters) == ["name", "config", "console", "folder"]

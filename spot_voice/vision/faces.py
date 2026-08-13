@@ -141,7 +141,15 @@ class FaceRecogniser:
     """
 
     def __init__(self, model_name: str = "buffalo_l", det_size: int = 640) -> None:
+        import warnings
+
         from insightface.app import FaceAnalysis
+
+        # insightface calls into numpy and scikit-image in ways both now warn
+        # about. Nothing here can act on them -- they are about the internals of
+        # a dependency -- and they print on every single detection, which buries
+        # the sample-by-sample feedback the operator is standing there reading.
+        warnings.filterwarnings("ignore", category=FutureWarning, module="insightface.*")
 
         self._app = FaceAnalysis(name=model_name, providers=["CPUExecutionProvider"])
         self._app.prepare(ctx_id=-1, det_size=(det_size, det_size))

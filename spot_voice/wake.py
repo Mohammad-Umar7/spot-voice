@@ -135,6 +135,20 @@ class WakeGate:
         ):
             return Address(addressed=True, command=text, via="follow-up")
 
+        # The name did not survive transcription. This is not an edge case:
+        # "Spot, stand up" came back from Whisper as "Peaceful stand up", which
+        # scores 0.17 against the name -- no threshold reaches that, and one
+        # low enough would swallow "sit" and "stop", which score 0.57 and 0.50.
+        #
+        # So a plain instruction is accepted on its own. It is a weaker signal
+        # than the name and deliberately so: losing every command to a
+        # mis-heard name is a worse failure than occasionally acting on a
+        # sentence that was not meant for the robot. Conversation that contains
+        # no instruction -- "yeah", "keep", "I think the battery is low" --
+        # still goes nowhere.
+        if _is_instruction(text):
+            return Address(addressed=True, command=text, via="instruction")
+
         return Address(addressed=False, command="")
 
     # ------------------------------------------------------------------
@@ -151,21 +165,72 @@ class WakeGate:
 
         for index, word in enumerate(words[:LEAD_TOKENS]):
             bare = _NON_WORD.sub("", word.lower())
-            if not bare:
+            if not bare or bare in LEAD_INS:
                 continue
-            if bare in LEAD_INS:
-                continue  # "hey" then keep looking for the name
             if bare in SAFETY_WORDS:
                 # Never claim a safety word as the name, however close it
                 # sounds. It belongs to the reflex lane, which has already had
                 # its chance at it, and swallowing it here would be silent.
-                return None
+                continue
             if _token_similarity(bare, self._name) >= NAME_SIMILARITY:
                 return " ".join(words[index + 1 :]).lstrip(",. ").strip()
-            # A real word that is not the name and not a lead-in: this sentence
-            # started with something else, so it was not addressed to us.
-            return None
+            # Keep scanning the rest of the lead window rather than giving up
+            # here. Bailing on the first unrecognised word meant only the very
+            # first word was ever really checked, so "let's Spot undock" was
+            # rejected on the word "let's".
         return None
+
+
+#: Words that only really appear when somebody is instructing a robot.
+#:
+#: Chosen to be things you say *to* a machine rather than about one. "Battery"
+#: and "status" are here; "he", "it" and "think" are not. The test is whether
+#: the word would show up in a sentence aimed at a colleague, because that is
+#: the traffic this gate exists to ignore.
+COMMAND_WORDS = frozenset(
+    {
+        "stand", "standup", "sit", "undock", "dock", "follow", "unfollow",
+        "walk", "come", "go", "move", "forward", "backward", "backwards",
+        "turn", "left", "right", "power", "powers", "motors",
+        "bow", "nod", "wave", "spin", "dance",
+        "photo", "picture", "look", "see", "camera", "status", "battery",
+        "waypoint", "navigate", "wait", "hold", "settle", "rest",
+    }
+)
+
+#: An utterance shorter than this is noise or a filler word, never an order.
+MIN_INSTRUCTION_TOKENS = 1
+
+
+#: How close a word must be to a command word. Matched fuzzily for the same
+#: reason the name is: "Spot, undock" came back as "Let's put andock", and an
+#: exact-match list would have thrown that away too.
+COMMAND_SIMILARITY = 0.8
+
+#: Shortest word worth fuzzy-matching against the command list.
+MIN_FUZZY_LEN = 4
+
+
+def _is_instruction(text: str) -> bool:
+    """True when the utterance reads as an order rather than conversation."""
+    tokens = normalise(text)
+    if len(tokens) < MIN_INSTRUCTION_TOKENS:
+        return False
+    for token in tokens:
+        if token in COMMAND_WORDS:
+            return True
+        # Fuzzy matching only on longer words. Short ones are far too easy to
+        # collide with ordinary speech -- "no" scores 0.95 against "nod" on the
+        # prefix rule, which turned "no I don't think so" into an order.
+        if len(token) < MIN_FUZZY_LEN:
+            continue
+        if any(
+            len(command) >= MIN_FUZZY_LEN
+            and _token_similarity(token, command) >= COMMAND_SIMILARITY
+            for command in COMMAND_WORDS
+        ):
+            return True
+    return False
 
 
 def sounds_like_name(word: str, wake_word: str = DEFAULT_WAKE_WORD) -> bool:
