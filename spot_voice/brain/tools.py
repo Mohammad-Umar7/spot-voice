@@ -127,11 +127,15 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "start_follow",
         "description": (
-            "Start follow-me. Spot tracks the nearest, most centred person with "
-            "its front camera and walks along behind them at roughly 1.5 m. "
-            "Spot's own obstacle avoidance remains active. Stops on stop_follow, "
-            "on the spoken word 'stop', or when the person is out of sight for "
-            "two seconds."
+            "Start follow-me. Spot locks onto whoever is standing nearest and "
+            "most centred in its front camera at that moment, then follows that "
+            "same person at roughly 1.5 m -- it will not switch to someone who "
+            "walks past. There is no face recognition, so when starting it is "
+            "worth telling the operator to stand in front of you. Spot's own "
+            "obstacle avoidance remains active. Stops on stop_follow, the spoken "
+            "word 'stop', or after the person is out of sight for two seconds "
+            "('I lost you'), after which it re-locks on whoever is front and "
+            "centre."
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },

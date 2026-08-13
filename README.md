@@ -516,8 +516,31 @@ The waypoint list is fetched once at startup for that reason.
 never steers.
 
 The loop runs at 8 Hz: front camera frame -> YOLOv8-nano person detection (CPU is
-fine) -> pick the largest, most centred person -> P-control with deadbands ->
-capped velocity command with the 0.6 s expiry.
+fine) -> pick the target -> P-control with deadbands -> capped velocity command
+with the 0.6 s expiry.
+
+### How it decides which person to follow
+
+**There is no face recognition. Spot does not know who you are.** It picks by
+position and size, in two phases:
+
+1. **Acquiring**, the moment you say "follow me": whoever is nearest and most
+   centred in the front camera wins. In practice that means **stand in front of
+   it when you say it** — a couple of metres, facing it, roughly centred.
+2. **Tracking**, every frame after: it stays locked on *that* person. A
+   detection only counts as them if it overlaps the previous sighting and is a
+   similar apparent size. Among candidates, the largest overlap wins.
+
+The lock is what stops the obvious failure: someone walking between you and
+Spot is much closer to the camera, so their box is bigger — on size alone they
+would steal the follow. With the lock, they are rejected on the size-ratio
+check, and if they hide you completely Spot holds still for those frames rather
+than transferring to them.
+
+If you are genuinely gone for more than two seconds it says **"I lost you"**,
+releases the lock, and re-acquires whoever is front and centre. So the recovery
+from a mix-up is simple: step in front of it, or say "stop following" and start
+again.
 
 - Yaw rate comes from horizontal offset from frame centre.
 - Forward speed comes from apparent size versus a target standoff of about 1.5 m.
@@ -605,7 +628,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-315 tests, no robot and no API key required. They cover:
+325 tests, no robot and no API key required. They cover:
 
 - the reflex matcher: stop words, transcription slips, and the false positives it
   must *not* fire on
@@ -613,7 +636,8 @@ python -m pytest
   never raises, a raising robot becomes a failed result
 - velocity capping, including NaN and infinity
 - tool schemas, including a guard that no safety-override tool has been added
-- the follow-me controller's target selection and control law
+- the follow-me controller's target selection and control law, including that
+  a person crossing between Spot and its target cannot steal the follow
 - the Anthropic tool-use loop end to end against a scripted fake client:
   parallel tool calls, image attachment, refusals, connection failure, abort, and
   the runaway-loop cap

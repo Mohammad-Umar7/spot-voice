@@ -55,6 +55,17 @@ MIN_CONFIDENCE = 0.4
 #: Generous, because the first YOLO run may be downloading model weights.
 DETECTOR_LOAD_TIMEOUT_SEC = 20.0
 
+#: Minimum box overlap (intersection over union) with the last sighting for a
+#: detection to count as the same person. Lenient: at 8 Hz a walking person
+#: moves only a few dozen pixels between frames.
+STICKY_IOU = 0.10
+
+#: Allowed change in apparent height between consecutive sightings of the
+#: tracked person. A person stepping between Spot and its target is much closer
+#: to the camera, so their box is far taller -- this is what stops the lock
+#: jumping to them even though their box overlaps the target's.
+STICKY_HEIGHT_RATIO = (0.6, 1.6)
+
 
 class PersonDetector(Protocol):
     """Anything that can find people in a JPEG frame."""
@@ -131,17 +142,57 @@ class SimulatedPersonDetector:
         return [(box[0], box[1], box[2], box[3], 0.9)]
 
 
+def _iou(a: Sequence[float], b: Sequence[float]) -> float:
+    """Intersection over union of two ``(x1, y1, x2, y2, ...)`` boxes."""
+    left = max(a[0], b[0])
+    top = max(a[1], b[1])
+    right = min(a[2], b[2])
+    bottom = min(a[3], b[3])
+    if right <= left or bottom <= top:
+        return 0.0
+    intersection = (right - left) * (bottom - top)
+    area_a = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
+    area_b = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+    union = area_a + area_b - intersection
+    return intersection / union if union > 0 else 0.0
+
+
 def pick_target(
-    boxes: Sequence[tuple[int, int, int, int, float]], frame_width: int
+    boxes: Sequence[tuple[int, int, int, int, float]],
+    frame_width: int,
+    previous: tuple[int, int, int, int, float] | None = None,
 ) -> tuple[int, int, int, int, float] | None:
     """Choose which detected person to follow.
 
-    Scores each box by area (nearer people are bigger) and by how centred it is,
-    so the controller keeps hold of the operator rather than swapping to someone
-    who wanders past the edge of frame.
+    Two modes:
+
+    * **Acquiring** (``previous is None``): score each box by area (nearer
+      people are bigger) and by how centred it is -- so saying "follow me" locks
+      onto whoever is standing front-and-centre of the robot.
+    * **Tracking** (``previous`` given): stick to the person already being
+      followed. A detection only counts as them if it overlaps the last
+      sighting *and* is a similar apparent size; among matches, the largest
+      overlap wins. If nobody matches, return ``None`` -- the controller holds
+      still rather than transferring the lock to whoever happens to look
+      biggest, which is exactly what a person walking between Spot and its
+      target would otherwise cause.
     """
     if not boxes:
         return None
+
+    if previous is not None:
+        previous_height = max(1.0, float(previous[3] - previous[1]))
+        best_match, best_overlap = None, 0.0
+        for box in boxes:
+            overlap = _iou(box, previous)
+            if overlap < STICKY_IOU:
+                continue
+            ratio = max(0.0, float(box[3] - box[1])) / previous_height
+            if not (STICKY_HEIGHT_RATIO[0] <= ratio <= STICKY_HEIGHT_RATIO[1]):
+                continue
+            if overlap > best_overlap:
+                best_match, best_overlap = box, overlap
+        return best_match
     centre = frame_width / 2.0 or 1.0
     best, best_score = None, float("-inf")
     for box in boxes:
@@ -284,6 +335,10 @@ class FollowController:
         period = 1.0 / LOOP_HZ
         last_seen = time.monotonic()
         announced_lost = False
+        # The lock: last confirmed sighting of the person being followed. While
+        # set, pick_target only accepts detections consistent with it, so the
+        # follow target cannot silently swap to a passer-by.
+        locked_box: tuple[int, int, int, int, float] | None = None
         LOGGER.info("Follow-me started")
 
         while not self._stop_event.is_set():
@@ -294,7 +349,7 @@ class FollowController:
                 if frame.ok and frame.image_jpeg:
                     boxes = detector.detect(frame.image_jpeg)
 
-                target = pick_target(boxes, detector.frame_size[0])
+                target = pick_target(boxes, detector.frame_size[0], previous=locked_box)
                 if target is None:
                     self._robot.drive(0.0, 0.0, 0.0)
                     if (
@@ -302,11 +357,15 @@ class FollowController:
                         and time.monotonic() - last_seen > LOST_AFTER_SEC
                     ):
                         announced_lost = True
+                        # Release the lock: after announcing, re-acquire whoever
+                        # stands front-and-centre, exactly like a fresh start.
+                        locked_box = None
                         LOGGER.info("Follow-me lost the target")
                         self._say("I lost you.")
                 else:
                     last_seen = time.monotonic()
                     announced_lost = False
+                    locked_box = target
                     velocity = compute_velocity(target, detector.frame_size)
                     self._robot.drive(*velocity.as_tuple())
             except Exception:

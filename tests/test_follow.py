@@ -188,3 +188,91 @@ def test_a_broken_detector_is_reported_not_raised():
     ok, message = controller.start()
     assert ok is False
     assert "detector" in message.lower()
+
+
+# ----------------------------------------------------------------------
+# Sticky tracking: once locked, the target must not silently swap
+
+
+def test_acquisition_without_a_lock_picks_the_prominent_person():
+    # The "stand in front of it when you say follow me" behaviour.
+    you = _box_at(320, 0.5)
+    someone_far = _box_at(100, 0.25)
+    assert pick_target([someone_far, you], FRAME[0], previous=None) == you
+
+
+def test_a_crosser_cannot_steal_the_lock():
+    # The scenario the lock exists for: someone steps between Spot and its
+    # target. Their box overlaps the target's and is much bigger (closer to the
+    # camera). Without stickiness they would win on size alone.
+    you_before = _box_at(320, 0.5)
+    you_now = _box_at(330, 0.5)  # you, one frame later
+    crosser = _box_at(325, 0.9)  # overlapping, far taller
+
+    assert pick_target([crosser, you_now], FRAME[0], previous=you_before) == you_now
+
+
+def test_full_occlusion_holds_still_rather_than_following_the_wrong_person():
+    # You are fully hidden behind the crosser: only their (much taller) box is
+    # visible. The controller must treat you as not-seen-this-frame, not
+    # transfer the lock.
+    you_before = _box_at(320, 0.5)
+    crosser = _box_at(322, 0.9)
+
+    assert pick_target([crosser], FRAME[0], previous=you_before) is None
+
+
+def test_normal_walking_motion_keeps_the_lock():
+    you_before = _box_at(320, 0.5)
+    you_now = _box_at(360, 0.55)  # stepped sideways, slightly closer
+    assert pick_target([you_now], FRAME[0], previous=you_before) == you_now
+
+
+def test_a_distant_person_across_the_room_never_matches_the_lock():
+    you_before = _box_at(320, 0.5)
+    unrelated = _box_at(600, 0.5)  # same size, no overlap at all
+    assert pick_target([unrelated], FRAME[0], previous=you_before) is None
+
+
+def test_among_overlapping_matches_the_larger_overlap_wins():
+    you_before = _box_at(320, 0.5)
+    near_match = _box_at(324, 0.52)
+    weak_match = _box_at(380, 0.5)
+    picked = pick_target([weak_match, near_match], FRAME[0], previous=you_before)
+    assert picked == near_match
+
+
+def test_controller_reacquires_after_announcing_lost():
+    # End to end: track someone, they vanish long enough for "I lost you",
+    # then a person appears again -- the controller must lock on fresh.
+    from spot_voice.robot.follow import LOST_AFTER_SEC
+
+    class Vanishing:
+        frame_size = (640, 480)
+
+        def __init__(self) -> None:
+            self.phase = "visible"
+
+        def detect(self, _frame: bytes):
+            if self.phase == "gone":
+                return []
+            return [_box_at(500, 0.3)]
+
+    robot = RecordingRobot()
+    spoken: list[str] = []
+    detector = Vanishing()
+    controller = FollowController(robot, lambda: detector, say=spoken.append)
+
+    controller.start()
+    time.sleep(0.4)  # tracking
+    detector.phase = "gone"
+    time.sleep(LOST_AFTER_SEC + 0.8)  # long enough to announce
+    detector.phase = "visible"
+    time.sleep(0.5)  # must re-acquire and drive again
+    driving_after_reacquire = any(
+        command != (0.0, 0.0, 0.0) for command in robot.commands[-3:]
+    )
+    controller.stop()
+
+    assert spoken == ["I lost you."]
+    assert driving_after_reacquire
