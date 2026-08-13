@@ -99,7 +99,7 @@ def test_sit_words_match(transcript):
 def test_stop_follow_matches_and_wins_over_plain_stop(transcript):
     found = match_reflex(transcript)
     assert found is not None, transcript
-    assert found.action is ReflexAction.STOP_FOLLOW
+    assert found.action is ReflexAction.STOP
 
 
 def test_transcription_slips_still_match():
@@ -187,8 +187,10 @@ def test_engine_stop_follow_when_not_following():
 
     outcome = engine.handle("stop following")
 
+    # Following was removed, so these phrases now stop outright rather than
+    # sitting as no-ops on a controller that never runs.
     assert outcome is not None and outcome.ok
-    assert "wasn't following" in outcome.message
+    assert outcome.message == "Stopped."
     assert "stop_all" in robot.calls
 
 
@@ -266,7 +268,7 @@ def test_stopping_is_never_reinterpreted_as_a_destination():
 def test_stop_following_still_wins_over_the_broader_stop():
     for phrase in ("stop following me", "stay there"):
         match = match_reflex(phrase)
-        assert match is not None and match.action is ReflexAction.STOP_FOLLOW, phrase
+        assert match is not None and match.action is ReflexAction.STOP, phrase
 
 
 def test_the_robots_name_never_blocks_a_safety_word():

@@ -109,8 +109,6 @@ class ToolDispatcher:
             "come_here": self._come_here,
             "navigate_to": self._navigate_to,
             "list_waypoints": self._list_waypoints,
-            "start_follow": self._start_follow,
-            "stop_follow": self._stop_follow,
             "capture_image": self._capture_image,
             "scan_room": self._scan_room,
             "get_status": self._get_status,
@@ -482,22 +480,7 @@ class ToolDispatcher:
     def _list_waypoints(self, _arguments: dict[str, Any]) -> ActionResult:
         return self._robot.list_waypoints()
 
-    def _start_follow(self, _arguments: dict[str, Any]) -> ActionResult:
-        if self._follow is None:
-            return fail("Follow-me isn't available right now.")
-        stand = self._robot.stand()
-        if not stand.ok:
-            return stand
-        ok_flag, message = self._follow.start()
-        return ActionResult(ok_flag, message)
 
-    def _stop_follow(self, _arguments: dict[str, Any]) -> ActionResult:
-        if self._follow is None:
-            return fail("Follow-me isn't available right now.")
-        ok_flag, message = self._follow.stop()
-        # The last velocity command can still have time left on it; settle.
-        self._robot.stop_all()
-        return ActionResult(ok_flag, message)
 
     def _capture_image(self, arguments: dict[str, Any]) -> ActionResult:
         camera = _as_text(arguments.get("camera")).lower() or "front"

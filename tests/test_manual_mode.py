@@ -42,8 +42,6 @@ def dispatcher():
         ("waypoints", ("list_waypoints", {})),
         ("undock", ("undock", {})),
         ("dock", ("dock", {})),
-        ("follow", ("start_follow", {})),
-        ("unfollow", ("stop_follow", {})),
     ],
 )
 def test_bare_commands(line, expected):
@@ -103,7 +101,7 @@ def test_unknown_commands_are_rejected_rather_than_guessed(line):
 def test_every_command_maps_to_a_real_tool():
     lines = [
         "stand", "sit", "stop", "status", "waypoints", "dock", "undock",
-        "follow", "unfollow", "look", "say hi", "go entrance", "move forward 1",
+        "look", "say hi", "go entrance", "move forward 1",
     ]
     for line in lines:
         parsed = parse_manual_command(line)

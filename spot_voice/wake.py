@@ -189,10 +189,11 @@ class WakeGate:
 #: the traffic this gate exists to ignore.
 COMMAND_WORDS = frozenset(
     {
-        "stand", "standup", "sit", "undock", "dock", "follow", "unfollow",
+        "stand", "standup", "sit", "undock", "dock",
         "walk", "come", "go", "move", "forward", "backward", "backwards",
         "turn", "left", "right", "power", "powers", "motors",
-        "bow", "nod", "wave", "spin", "dance",
+        "bow", "nod", "wave", "spin", "dance", "rotate",
+        "scan", "around", "count",
         "photo", "picture", "look", "see", "camera", "status", "battery",
         "waypoint", "navigate", "wait", "hold", "settle", "rest",
     }
@@ -200,6 +201,16 @@ COMMAND_WORDS = frozenset(
 
 #: An utterance shorter than this is noise or a filler word, never an order.
 MIN_INSTRUCTION_TOKENS = 1
+
+#: Longest utterance that may be admitted on a command word alone.
+#:
+#: Orders are short: "stand up", "sit down", "scan the room". Explaining the
+#: robot to a room is not, and during a live demo the sentence "and yeah, there
+#: are multiple capabilities, so it follows us as well" was admitted on the word
+#: "follows" and answered with stop_all. Length separates the two far better
+#: than vocabulary does, because the giveaway is not which words were used but
+#: how many. Anything longer still works -- it just has to be addressed by name.
+MAX_INSTRUCTION_TOKENS = 8
 
 
 #: How close a word must be to a command word. Matched fuzzily for the same
@@ -214,7 +225,7 @@ MIN_FUZZY_LEN = 4
 def _is_instruction(text: str) -> bool:
     """True when the utterance reads as an order rather than conversation."""
     tokens = normalise(text)
-    if len(tokens) < MIN_INSTRUCTION_TOKENS:
+    if not (MIN_INSTRUCTION_TOKENS <= len(tokens) <= MAX_INSTRUCTION_TOKENS):
         return False
     for token in tokens:
         if token in COMMAND_WORDS:

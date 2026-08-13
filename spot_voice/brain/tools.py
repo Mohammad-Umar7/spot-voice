@@ -175,31 +175,6 @@ TOOLS: list[dict[str, Any]] = [
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
-        "name": "start_follow",
-        "description": (
-            "Start follow-me. If the operator's face is enrolled, Spot turns "
-            "slowly on the spot to look for them, locks on once it recognises "
-            "them, and then follows that same person at roughly 1.5 m using how "
-            "they look from behind -- so it keeps them even when it can only see "
-            "their back, and will not switch to someone who walks past. Without "
-            "an enrolled face it locks onto whoever is standing in front of it, "
-            "so it is worth telling the operator to stand in front of you. "
-            "Spot's own obstacle avoidance remains active. Stops on stop_follow, "
-            "the spoken word 'stop', or after the person is out of sight for two "
-            "seconds ('I lost you'), after which it looks for them again."
-        ),
-        "input_schema": {"type": "object", "properties": {}, "required": []},
-    },
-    {
-        "name": "stop_follow",
-        "description": (
-            "Stop follow-me and hold position. Call this when the operator says "
-            "they are done walking, or asks you to wait somewhere while they "
-            "carry on without you."
-        ),
-        "input_schema": {"type": "object", "properties": {}, "required": []},
-    },
-    {
         "name": "capture_image",
         "description": (
             "Take one photo from a body camera and return it so you can see it. "
@@ -370,8 +345,6 @@ COMPACT_DESCRIPTIONS: dict[str, str] = {
     ),
     "navigate_to": "Walk to a named map waypoint. Use list_waypoints if unsure of the name.",
     "list_waypoints": "Names of places on the map.",
-    "start_follow": "Start following the operator. Tell them to stand in front of you.",
-    "stop_follow": "Stop following and hold position.",
     "capture_image": "Take a photo and see it. Use for 'what do you see'. Describe only what is there.",
     "get_status": "Battery, motor power, e-stop, dock and localization.",
     "dock": "Return to the charging dock.",

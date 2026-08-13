@@ -24,8 +24,6 @@ EXPECTED_TOOLS = {
     "come_here",
     "navigate_to",
     "list_waypoints",
-    "start_follow",
-    "stop_follow",
     "capture_image",
     "scan_room",
     "get_status",

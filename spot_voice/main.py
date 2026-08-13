@@ -460,8 +460,6 @@ _MANUAL_ALIASES: dict[str, str] = {
     "places": "list_waypoints",
     "dock": "dock",
     "undock": "undock",
-    "follow": "start_follow",
-    "unfollow": "stop_follow",
 }
 
 MANUAL_HELP = """\

@@ -82,8 +82,6 @@ def test_unknown_tool_is_reported_not_raised(dispatcher):
         ("capture_image", {"camera": "front"}),
         ("move", {"direction": "forward", "distance_m": 0.2}),
         ("navigate_to", {"waypoint_name": "entrance"}),
-        ("start_follow", {}),
-        ("stop_follow", {}),
         ("speak", {"text": "hello"}),
         ("dock", {}),
         ("undock", {}),
@@ -165,18 +163,6 @@ def test_speak_tool_rejects_empty_text(dispatcher):
     assert dispatcher.dispatch("speak", {"text": "   "}).ok is False
 
 
-def test_motion_tools_stop_follow_first(dispatcher):
-    dispatcher.dispatch("start_follow", {})
-    assert dispatcher.follow.active
-    dispatcher.dispatch("move", {"direction": "forward", "distance_m": 0.1})
-    assert dispatcher.follow.stopped >= 1
-    assert not dispatcher.follow.active
-
-
-def test_get_status_reports_follow_state(dispatcher):
-    dispatcher.dispatch("start_follow", {})
-    result = dispatcher.dispatch("get_status", {})
-    assert result.payload["following"] is True
 
 
 def test_a_raising_robot_becomes_a_failed_result(dispatcher):

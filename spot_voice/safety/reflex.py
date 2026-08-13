@@ -60,19 +60,17 @@ class ReflexRule:
 #: "stop following" resolves to STOP_FOLLOW rather than the broader STOP.
 REFLEX_RULES: tuple[ReflexRule, ...] = (
     ReflexRule(
-        ReflexAction.STOP_FOLLOW,
+        ReflexAction.STOP,
         (
+            # "stay there" and "stop following" used to route to a dedicated
+            # STOP_FOLLOW action. Following has been removed, so rather than
+            # leave them as no-ops they now do the safe thing and stop outright.
             "stop following",
             "stop following me",
             "stop follow",
             "quit following",
             "don t follow me",
             "stay there",
-        ),
-    ),
-    ReflexRule(
-        ReflexAction.STOP,
-        (
             "stop",
             "freeze",
             "halt",
