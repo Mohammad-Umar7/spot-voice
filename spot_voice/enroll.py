@@ -39,20 +39,42 @@ SAMPLE_COUNT = 5
 SAMPLE_GAP_SEC = 1.2
 
 
+#: What to do between samples, so the samples actually differ. Variety in angle
+#: is what makes acquisition work in whatever pose you happen to be standing.
+POSE_PROMPTS = (
+    "look straight at me",
+    "turn your head slightly left",
+    "turn your head slightly right",
+    "tilt your chin up a little",
+    "look straight at me again",
+)
+
+
 def _robot_frames(robot, count: int, gap: float, console: Console):
-    """Yield frames from Spot's front camera."""
+    """Yield frames from Spot's front camera, telling the operator what to do.
+
+    You do this standing in front of a robot, not watching a terminal, so each
+    sample is announced before it is taken rather than reported after. Silent
+    capture would mean holding still at the wrong moments.
+    """
     from .robot.follow import decode_jpeg
 
+    console.print("[bold]Starting in 3 seconds -- get in front of the robot.[/bold]")
+    time.sleep(3.0)
+
     for index in range(count):
+        prompt = POSE_PROMPTS[index % len(POSE_PROMPTS)]
+        console.print(f"\n[bold cyan]{index + 1}/{count}:[/bold cyan] {prompt}...")
         time.sleep(gap)
+
         capture = robot.capture_image("front")
         if not capture.ok or not capture.image_jpeg:
-            console.print(f"[yellow]Camera returned nothing: {capture.message}[/yellow]")
+            console.print(f"[yellow]  camera returned nothing: {capture.message}[/yellow]")
             continue
         frame = decode_jpeg(capture.image_jpeg)
         if frame is None:
+            console.print("[yellow]  could not decode that frame[/yellow]")
             continue
-        console.print(f"  sample {index + 1}/{count}")
         yield frame
 
 
@@ -122,7 +144,9 @@ def enroll(
             console.print(f"[yellow]  detection failed: {exc}[/yellow]")
             continue
         if not faces:
-            console.print("[yellow]  no face in that frame[/yellow]")
+            console.print(
+                "[yellow]  no face found -- get closer and face the robot[/yellow]"
+            )
             continue
         if len(faces) > 1:
             # Ambiguous: enrolling the wrong face would be worse than skipping.
@@ -134,6 +158,7 @@ def enroll(
         _box, embedding = faces[0]
         store.add(name, embedding)
         captured += 1
+        console.print(f"[green]  got it ({captured} so far)[/green]")
 
     if captured == 0:
         console.print(
