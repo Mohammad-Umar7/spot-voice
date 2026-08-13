@@ -28,7 +28,16 @@ FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS // 1000
 FRAME_BYTES = FRAME_SAMPLES * 2  # int16
 
 #: Audio kept from before speech was detected, so the first phoneme survives.
-PRE_SPEECH_MS = 320
+#: Audio kept from *before* speech is detected, and prepended to the utterance.
+#: Generous on purpose: it costs a fraction of a second of extra audio to
+#: transcribe and it is what stops the first word being clipped.
+PRE_SPEECH_MS = 700
+
+#: Window the "has speech started" decision is made over. Deliberately shorter
+#: than the pre-roll -- it controls how quickly the segmenter reacts, while
+#: PRE_SPEECH_MS controls how much lead-in survives. Tying them together is
+#: what ate the start of words.
+TRIGGER_WINDOW_MS = 300
 #: Silence needed to close an utterance.
 POST_SPEECH_MS = 700
 #: Fraction of a window that must be speech (or silence) to flip state.
@@ -145,6 +154,10 @@ class UtteranceSegmenter:
         self._post_frames = max(1, post_speech_ms // FRAME_MS)
         self._max_frames = max(1, max_utterance_ms // FRAME_MS)
         self._min_frames = max(1, min_utterance_ms // FRAME_MS)
+        # Decision window, kept separate from the pre-roll. See push().
+        self._trigger_frames = min(
+            self._pre_frames, max(1, TRIGGER_WINDOW_MS // FRAME_MS)
+        )
 
         self._ring: collections.deque[tuple[bytes, bool]] = collections.deque(
             maxlen=self._pre_frames
@@ -176,10 +189,25 @@ class UtteranceSegmenter:
 
         if not self._triggered:
             self._ring.append((frame, speech))
-            voiced_count = sum(1 for _, flag in self._ring if flag)
+            # The decision is made on the most recent frames only, while the
+            # ring keeps a longer tail to prepend once it fires.
+            #
+            # These were one and the same buffer, and it lost the start of
+            # words. Requiring 60% of a 320 ms window to be speech means about
+            # 200 ms of it is already the utterance, leaving barely 120 ms of
+            # lead-in -- and an unvoiced fricative lasts about that long and is
+            # exactly what webrtcvad is worst at hearing. The result on the
+            # robot was "Spot, stand up" transcribed as "or stand up": the word
+            # was not mistranscribed, it was never recorded.
+            #
+            # Enlarging the single buffer could not fix it, because the trigger
+            # threshold scaled with it: a longer window needed proportionally
+            # more speech before firing, and the lead-in stayed just as thin.
+            window = list(self._ring)[-self._trigger_frames :]
+            voiced_count = sum(1 for _, flag in window if flag)
             if (
-                len(self._ring) == self._ring.maxlen
-                and voiced_count > TRIGGER_RATIO * len(self._ring)
+                len(window) == self._trigger_frames
+                and voiced_count > TRIGGER_RATIO * self._trigger_frames
             ):
                 self._triggered = True
                 self._silence_run = 0

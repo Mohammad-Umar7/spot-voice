@@ -157,3 +157,80 @@ def test_a_missing_ctranslate2_is_not_fatal(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", explode)
     assert stt.cuda_is_available() is False
+
+
+# ----------------------------------------------------------------------
+# Keeping the start of the first word
+#
+# On the robot, "Spot, stand up" was transcribed as "or stand up" and "Spot,
+# say hi" as "or say hi" -- while the same sentences, said again, came through
+# perfectly. The word was not mistranscribed; it was never recorded. The
+# segmenter's decision window and its pre-roll buffer were the same deque, so
+# by the time enough speech had accumulated to trigger, the quiet fricative at
+# the start had already scrolled out of it.
+
+
+class ScriptedDetector:
+    """Flags speech per frame from a fixed pattern."""
+
+    name = "scripted"
+
+    def __init__(self, pattern) -> None:
+        self.pattern = list(pattern)
+        self.index = -1
+
+    def is_speech(self, _frame: bytes) -> bool:
+        self.index += 1
+        if self.index < len(self.pattern):
+            return self.pattern[self.index]
+        return False
+
+
+def _frames(segmenter, count, marker=0):
+    from spot_voice.audio.vad import FRAME_BYTES
+
+    out = []
+    for _ in range(count):
+        out.extend(segmenter.push(bytes([marker]) * FRAME_BYTES))
+    return out
+
+
+def test_the_pre_roll_is_longer_than_the_trigger_window():
+    """The whole fix: deciding quickly must not mean keeping little."""
+    from spot_voice.audio.vad import PRE_SPEECH_MS, TRIGGER_WINDOW_MS
+
+    assert PRE_SPEECH_MS > TRIGGER_WINDOW_MS
+
+
+def test_audio_from_before_the_trigger_is_kept():
+    from spot_voice.audio.vad import FRAME_MS, PRE_SPEECH_MS, UtteranceSegmenter
+
+    # Silence, then continuous speech. The quiet run stands in for the "s" of
+    # "Spot" -- audio the detector does not flag but the transcriber needs.
+    lead_in = 10
+    detector = ScriptedDetector(
+        [False] * lead_in + [True] * 60 + [False] * 200
+    )
+    segmenter = UtteranceSegmenter(detector=detector)
+
+    _frames(segmenter, lead_in, marker=1)   # the lead-in
+    _frames(segmenter, 60, marker=2)        # the rest of the word
+    utterances = _frames(segmenter, 60, marker=0)  # trailing silence ends it
+
+    assert utterances, "no utterance was produced"
+    audio = utterances[0]
+
+    from spot_voice.audio.vad import FRAME_BYTES
+
+    kept = 0
+    while audio[kept * FRAME_BYTES : (kept + 1) * FRAME_BYTES] == b"\x01" * FRAME_BYTES:
+        kept += 1
+
+    # All of it, not merely some. The old design retained 120 ms however much
+    # there was, because the pre-roll was also the decision window; an unvoiced
+    # fricative runs 100-150 ms, which is why the word survived on some takes
+    # and vanished on others.
+    assert kept == lead_in, (
+        f"kept only {kept * FRAME_MS} ms of a {lead_in * FRAME_MS} ms lead-in"
+    )
+    assert PRE_SPEECH_MS // FRAME_MS >= lead_in
