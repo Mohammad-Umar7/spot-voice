@@ -94,7 +94,9 @@ class VoiceApp:
             follow=self.follow,
             speak=lambda text: self.speaker.speak(text),
             console=self.console,
+            pose_reader=self._read_pointing,
         )
+        self._pose_model: Any = None
         self.brain: Any = None
         self.reflex = ReflexEngine(
             robot=self.robot,
@@ -108,6 +110,18 @@ class VoiceApp:
         self._shutdown = threading.Event()
 
     # ------------------------------------------------------------------
+
+    def _read_pointing(self, frame_jpeg: bytes):
+        """Read a pointing gesture from a frame, loading the model on first use.
+
+        Lazy because the pose weights download on first run and most sessions
+        never ask anyone to point at anything.
+        """
+        if self._pose_model is None:
+            from .vision.pointing import YoloPoseReader
+
+            self._pose_model = YoloPoseReader()
+        return self._pose_model(frame_jpeg)
 
     def _build_tracker(self):
         """The identity tracker follow-me uses to stay locked on one person."""
@@ -401,6 +415,7 @@ MANUAL_HELP = """\
   waypoints             list the places on the map
   undock | dock         leave or return to the charger
   follow | unfollow     follow-me
+  point                 look for a pointing gesture and walk that way
   emote <gesture>       greet | bow | nod | shake | wiggle | look_around
   say <text>            speak through the speaker
   help                  this list
@@ -428,6 +443,9 @@ def parse_manual_command(line: str) -> tuple[str, dict[str, Any]] | None:
 
     if head == "say":
         return "speak", {"text": " ".join(rest)}
+
+    if head in {"point", "there", "gothere"}:
+        return "go_where_pointed", {}
 
     if head in {"emote", "gesture", "do"}:
         return ("emote", {"gesture": rest[0]}) if rest else None

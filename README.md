@@ -62,10 +62,12 @@ replies in one or two sentences. That reply is spoken aloud.
 ## Safety model
 
 - **Spot's own safety systems are never touched.** Obstacle avoidance,
-  self-righting and stair handling stay at their factory defaults. There is no
-  code path that changes an obstacle-padding parameter, and no tool exposes one.
-  A test (`test_no_tool_exposes_a_safety_override`) fails the build if one is
-  ever added.
+  self-righting and stair handling stay at their factory defaults, permanently.
+  This is checked against the source: `tests/test_safety_invariants.py` fails the
+  build if any field of `MobilityParams.obstacle_params` is ever referenced, or
+  if a `MobilityParams` is constructed at all. The way to weaken obstacle
+  avoidance is to set one of those fields; the way to guarantee we never do is to
+  never name one.
 - **Hard velocity caps live in code, not config.** `|v_x| <= 0.6 m/s`,
   `|v_y| <= 0.4 m/s`, `|v_rot| <= 0.8 rad/s`. Every velocity that reaches the SDK
   passes through `clamp_velocity()`. Nothing in `.env` can raise them and no tool
@@ -81,6 +83,11 @@ replies in one or two sentences. That reply is spoken aloud.
 - **The reflex "stop" is a safe stop, not a power cut.** It cancels the active
   command and any GraphNav route and settles into a stable stand.
   `settle_then_cut` is reserved for a real emergency power cut.
+- **Closing the program puts the robot down.** A graceful exit sits Spot and
+  powers the motors off before releasing the lease, so it is never left standing
+  unattended. If the program is *killed* instead, the e-stop keep-alive stops
+  checking in and the robot cuts motor power itself -- that path does not depend
+  on any code of ours running.
 - **The physical e-stop on the tablet is always the ultimate authority.** Keep a
   human on it for every session on the real robot.
 - **The matcher deliberately over-triggers.** "don't stop" stops the robot. A
@@ -610,6 +617,7 @@ spot_voice/
     mock.py          the simulated robot
     follow.py        follow-me thread and P-controller
   vision/
+    pointing.py      reading "over there" off a pointing arm
     faces.py         enrollment store + InsightFace recognition
     appearance.py    the colour signature that works from behind
     identity.py      the three-layer lock: geometry, appearance, face
@@ -633,7 +641,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-389 tests, no robot and no API key required. They cover:
+439 tests, no robot and no API key required. They cover:
 
 - the reflex matcher: stop words, transcription slips, and the false positives it
   must *not* fire on
@@ -647,6 +655,13 @@ python -m pytest
   from behind, occlusion holding rather than re-targeting, and re-finding
   someone after geometry breaks
 - gesture pose clamping, including NaN and out-of-range angles
+- pointing: bearing tracks the arm and does not saturate, distance only ever
+  comes from a measurement or the modest default, and the robot announces its
+  reading before it moves
+- **safety invariants read off the source itself**: that no obstacle-avoidance
+  field is ever referenced, no MobilityParams is ever constructed, e-stop
+  release is unreachable from any tool, every velocity is clamped and carries an
+  expiry, and face recognition is confined to follow-me
 - the Anthropic tool-use loop end to end against a scripted fake client:
   parallel tool calls, image attachment, refusals, connection failure, abort, and
   the runaway-loop cap

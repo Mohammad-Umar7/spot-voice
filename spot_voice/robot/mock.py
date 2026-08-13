@@ -114,6 +114,11 @@ class MockSpot(RobotInterface):
 
     def shutdown(self) -> None:
         if self._connected:
+            if self._powered:
+                # Matches SpotClient: closing the program puts the robot down.
+                self._log("safe_power_off_motors -> sit, then motors off")
+                self._standing = False
+                self._powered = False
             self._log("lease released, e-stop endpoint shut down")
         self._connected = False
 
@@ -333,6 +338,20 @@ class MockSpot(RobotInterface):
             {"camera": camera, "source": source},
             image_jpeg=data,
         )
+
+    def has_lidar(self) -> bool:
+        # The mock rehearses the stereo-depth path, which every Spot has.
+        return False
+
+    def measure_distance(self, bearing_deg: float = 0.0) -> float | None:
+        # A plausible room: a few metres of clear floor, a little closer off to
+        # the sides, so the pointing flow gets an interesting number to use.
+        distance = 4.0 - min(abs(bearing_deg), 60.0) / 60.0 * 1.5
+        self._log(
+            f"depth along {bearing_deg:+.0f} deg -> {distance:.1f} m",
+            throttle_key="depth",
+        )
+        return distance
 
     def get_status(self) -> ActionResult:
         with self._lock:

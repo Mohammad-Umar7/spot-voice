@@ -166,6 +166,60 @@ def check_vision_provider(config) -> Check:
     return Check("vision api", False, f"unknown provider {choice!r}", "Fix VISION_PROVIDER")
 
 
+def check_depth_sensing(config) -> Check:
+    """Report which range sensor this robot actually has.
+
+    Base Spot has stereo depth on every camera pair. The Enhanced Autonomy
+    Payload adds a Velodyne LiDAR, which registers as a point-cloud service.
+    Asked at runtime rather than assumed either way -- it decides how accurate
+    "go where I'm pointing" will be.
+    """
+    if config.mock_robot:
+        return Check("range sensing", True, "MOCK_ROBOT=true, simulated depth")
+    try:
+        import bosdyn.client  # noqa: F401
+    except ImportError:
+        return Check("range sensing", True, "unknown (Spot SDK not installed)")
+    return Check(
+        "range sensing",
+        True,
+        "checked when connected: LiDAR if a point-cloud service is registered, "
+        "otherwise the stereo depth cameras",
+    )
+
+
+def check_faces(config) -> Check:
+    """Is anyone enrolled, and can the recogniser load?"""
+    if not config.face_recognition:
+        return Check(
+            "face recognition",
+            True,
+            "FACE_RECOGNITION=false; follow-me uses position only",
+        )
+
+    from .vision.faces import FaceStore
+
+    store = FaceStore(config.face_store_path)
+    if store.is_empty:
+        return Check(
+            "face recognition",
+            True,
+            "nobody enrolled; follow-me locks onto whoever is in front",
+            "Run: python -m spot_voice --enroll <name>",
+        )
+    try:
+        import insightface  # noqa: F401
+    except ImportError:
+        return Check(
+            "face recognition",
+            False,
+            f"enrolled: {', '.join(store.names)} -- but insightface is not installed",
+            "pip install insightface onnxruntime, or set FACE_RECOGNITION=false",
+        )
+    following = config.operator_name or "(OPERATOR_NAME not set)"
+    return Check("face recognition", True, f"enrolled: {', '.join(store.names)}; following {following}")
+
+
 def check_microphone(config) -> Check:
     """Does the configured microphone exist?"""
     from .audio.devices import MicrophoneNotFound, list_input_devices, select_input_device
@@ -326,6 +380,8 @@ ALL_CHECKS = (
     check_spot_sdk,
     check_model_provider,
     check_vision_provider,
+    check_depth_sensing,
+    check_faces,
     check_microphone,
     check_map,
 )

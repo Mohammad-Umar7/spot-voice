@@ -41,6 +41,17 @@ SDK_NAME = "SpotVoiceClient"
 #: Reconnect backoff schedule in seconds.
 _BACKOFF = (1.0, 2.0, 4.0, 8.0, 15.0, 30.0)
 
+#: Horizontal field of view of the front depth cameras, in degrees. Used to map
+#: a bearing onto a column band. Approximate -- adjust if pointing reads wide.
+DEPTH_HFOV_DEG = 100.0
+
+#: Half-width of the bearing window used when sampling a LiDAR point cloud.
+LIDAR_BEARING_WINDOW_DEG = 6.0
+
+#: How long to allow for sitting down and powering off when the program exits.
+#: Bounded so Ctrl-C never appears to hang.
+SHUTDOWN_TIMEOUT_SEC = 20.0
+
 
 class SpotClient(RobotInterface):
     """Talks to a real Spot.
@@ -156,10 +167,50 @@ class SpotClient(RobotInterface):
             LOGGER.info("Connected to Spot at %s", self._ip)
 
     def shutdown(self) -> None:
-        """Release everything and stop reconnecting. Safe to call more than once."""
+        """Put the robot down safely, then release everything.
+
+        Closing the program must leave the robot in a safe state, not standing
+        unattended with a lease nobody holds. So this sits it down and powers the
+        motors off before letting go.
+
+        Note this is the *graceful* path. If the program is killed or crashes
+        instead, the e-stop keep-alive stops checking in and the robot cuts motor
+        power on its own -- that is the dead-man's switch, and it does not depend
+        on this method running.
+
+        Safe to call more than once.
+        """
         self._closing.set()
         self._abort.set()
+        self._safe_power_down()
         self._teardown()
+
+    def _safe_power_down(self) -> None:
+        """Sit the robot down and cut motor power. Never raises.
+
+        ``safe_power_off_motors`` sits first and then powers down, so the robot
+        settles rather than dropping. If the link is already gone there is
+        nothing to do -- the e-stop timeout handles it.
+        """
+        if not self._connected or self._command_client is None:
+            return
+        from bosdyn.api import robot_state_pb2
+        from bosdyn.client.power import safe_power_off_motors
+
+        try:
+            state = self._state_client.get_robot_state()
+            if state.power_state.motor_power_state != robot_state_pb2.PowerState.STATE_ON:
+                return  # already down
+            LOGGER.info("Sitting and powering off before exit")
+            safe_power_off_motors(
+                self._command_client,
+                self._state_client,
+                timeout_sec=SHUTDOWN_TIMEOUT_SEC,
+                update_frequency=2,
+            )
+        except Exception:
+            # Never block or raise on the way out; the e-stop is the backstop.
+            LOGGER.warning("Could not power down cleanly on exit", exc_info=True)
 
     def _teardown(self) -> None:
         """Drop the lease and e-stop endpoint without ending the session.
@@ -579,6 +630,112 @@ class SpotClient(RobotInterface):
             image_jpeg=jpeg,
         )
 
+    def has_lidar(self) -> bool:
+        """True when a point-cloud service (EAP LiDAR) is registered on this robot.
+
+        Base Spot has stereo depth on every camera pair but no LiDAR; the
+        Enhanced Autonomy Payload adds a Velodyne, which registers itself as a
+        point-cloud service. Rather than assume either way, this asks the robot.
+        """
+        if self._robot is None:
+            return False
+        try:
+            from bosdyn.client.point_cloud import PointCloudClient
+
+            self._robot.ensure_client(PointCloudClient.default_service_name)
+            return True
+        except Exception:
+            return False
+
+    def measure_distance(self, bearing_deg: float = 0.0) -> float | None:
+        """Metres to the nearest surface along a bearing.
+
+        Prefers LiDAR when the robot has it, because a point cloud gives a true
+        range along a bearing. Falls back to the stereo depth cameras, which
+        every Spot has. Returns ``None`` when neither produced a reading --
+        callers must read that as "no measurement", never as "nothing there".
+        """
+        if self.has_lidar():
+            distance = self._distance_from_lidar(bearing_deg)
+            if distance is not None:
+                return distance
+        return self._distance_from_depth(bearing_deg)
+
+    def _distance_from_lidar(self, bearing_deg: float) -> float | None:
+        """Nearest return within a narrow bearing window of the point cloud."""
+        import numpy as np
+
+        try:
+            from bosdyn.client.point_cloud import PointCloudClient, build_pc_request
+
+            client = self._robot.ensure_client(PointCloudClient.default_service_name)
+            sources = client.list_point_cloud_sources()
+            if not sources:
+                return None
+            responses = client.get_point_cloud(
+                [build_pc_request(sources[0].name)]
+            )
+            if not responses:
+                return None
+            cloud = responses[0].point_cloud
+            points = np.frombuffer(cloud.data, dtype=np.float32).reshape(-1, 3)
+        except Exception:
+            LOGGER.debug("LiDAR read failed", exc_info=True)
+            return None
+
+        return _nearest_in_bearing_window(points, bearing_deg)
+
+    def _distance_from_depth(self, bearing_deg: float) -> float | None:
+        """Nearest depth pixel in the column band matching a bearing."""
+        import numpy as np
+
+        # Pick the front camera the bearing falls on. Positive bearing is to the
+        # robot's left, which is the frontleft camera.
+        source = (
+            "frontleft_depth_in_visual_frame"
+            if bearing_deg >= 0
+            else "frontright_depth_in_visual_frame"
+        )
+        try:
+            responses = self._call(
+                "depth", lambda: self._image_client.get_image_from_sources([source])
+            )
+        except Exception:
+            LOGGER.debug("depth read failed", exc_info=True)
+            return None
+        if not responses:
+            return None
+
+        try:
+            shot = responses[0].shot.image
+            scale = responses[0].source.depth_scale or 1000.0
+            depth = np.frombuffer(shot.data, dtype=np.uint16).reshape(
+                shot.rows, shot.cols
+            )
+        except Exception:
+            LOGGER.debug("could not decode depth image", exc_info=True)
+            return None
+
+        # Sample a vertical band around the bearing, in the middle third of the
+        # frame height -- floor and ceiling returns are not what "over there"
+        # means.
+        columns = shot.cols
+        offset = max(-1.0, min(1.0, -bearing_deg / (DEPTH_HFOV_DEG / 2.0)))
+        centre = int((offset + 1.0) / 2.0 * columns)
+        half_band = max(4, columns // 20)
+        left = max(0, centre - half_band)
+        right = min(columns, centre + half_band)
+        top = shot.rows // 3
+        bottom = shot.rows * 2 // 3
+
+        band = depth[top:bottom, left:right]
+        valid = band[band > 0]
+        if valid.size < 20:
+            return None
+        # 10th percentile rather than the minimum: one stray near-pixel should
+        # not decide how far the robot walks.
+        return float(np.percentile(valid, 10)) / float(scale)
+
     def get_status(self) -> ActionResult:
         from bosdyn.api import robot_state_pb2
 
@@ -690,6 +847,39 @@ def _to_upright_jpeg(image_response: Any, rotation_degrees: int) -> bytes:
     if not success:
         raise ValueError("could not encode camera image as JPEG")
     return encoded.tobytes()
+
+
+def _nearest_in_bearing_window(
+    points, bearing_deg: float, window_deg: float = LIDAR_BEARING_WINDOW_DEG
+) -> float | None:
+    """Nearest LiDAR return within a bearing window, ignoring floor and ceiling.
+
+    Args:
+        points: ``(N, 3)`` array of x/y/z points in the sensor frame, metres.
+        bearing_deg: Bearing of interest; positive is to the robot's left.
+        window_deg: Half-width of the angular window to consider.
+
+    Returns:
+        Range in metres, or ``None`` when too few points fall in the window.
+    """
+    import numpy as np
+
+    if points is None or len(points) == 0:
+        return None
+
+    x, y, z = points[:, 0], points[:, 1], points[:, 2]
+    # Drop the ground and anything overhead: "over there" is a place on the
+    # floor, and a return off the floor two metres out is not an obstacle.
+    upright = (z > -0.4) & (z < 1.2)
+    angles = np.degrees(np.arctan2(y, x))
+    in_window = np.abs(angles - bearing_deg) <= window_deg
+    selected = np.hypot(x, y)[upright & in_window]
+
+    if selected.size < 10:
+        return None
+    # 10th percentile, not the minimum: a single stray return should not decide
+    # how far the robot walks.
+    return float(np.percentile(selected, 10))
 
 
 def rotate_image(frame: np.ndarray, degrees: int) -> np.ndarray:

@@ -161,6 +161,23 @@ class RobotInterface(abc.ABC):
         """Grab one upright JPEG frame from the named camera."""
 
     @abc.abstractmethod
+    def has_lidar(self) -> bool:
+        """True when this robot has a LiDAR payload registered.
+
+        Base Spot has stereo depth on every camera pair; the Enhanced Autonomy
+        Payload adds a Velodyne. Asked at runtime rather than assumed.
+        """
+
+    @abc.abstractmethod
+    def measure_distance(self, bearing_deg: float = 0.0) -> float | None:
+        """Metres to the nearest surface along a bearing, from the depth cameras.
+
+        Spot has stereo depth on every camera pair; this reads it. Returns
+        ``None`` when depth is unavailable, which callers must treat as "no
+        reading" rather than "nothing there".
+        """
+
+    @abc.abstractmethod
     def get_status(self) -> ActionResult:
         """Return battery, motor power, lease/e-stop state and localization."""
 

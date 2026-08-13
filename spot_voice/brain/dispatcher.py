@@ -74,17 +74,22 @@ class ToolDispatcher:
         follow=None,
         speak: Callable[[str], None] | None = None,
         console: Console | None = None,
+        pose_reader: Callable[[bytes], Any] | None = None,
     ) -> None:
         self._robot = robot
         self._follow = follow
         self._speak = speak
         self._console = console or Console()
+        # Reads a pointing gesture from a JPEG. Injected so the pose model is
+        # only loaded when something actually needs it.
+        self._pose_reader = pose_reader
         self._handlers: dict[str, Callable[[dict[str, Any]], ActionResult]] = {
             "power_on": self._power_on,
             "stand": self._stand,
             "sit": self._sit,
             "emote": self._emote,
             "move": self._move,
+            "go_where_pointed": self._go_where_pointed,
             "navigate_to": self._navigate_to,
             "list_waypoints": self._list_waypoints,
             "start_follow": self._start_follow,
@@ -190,6 +195,82 @@ class ToolDispatcher:
             distance_m=_as_number(arguments.get("distance_m")),
             degrees=_as_number(arguments.get("degrees")),
             speed=_as_number(arguments.get("speed")),
+        )
+
+    def _go_where_pointed(self, _arguments: dict[str, Any]) -> ActionResult:
+        """Read a pointing gesture, measure the distance, and walk there.
+
+        The gesture supplies the bearing, which it does reliably. It supplies no
+        distance at all -- so that comes from the depth sensor, stopping short of
+        whatever is in the way. Spot says what it understood before moving, so a
+        misread is corrected rather than acted upon.
+        """
+        from ..vision.pointing import apply_measured_distance
+
+        if self._pose_reader is None:
+            return fail("I can't see gestures right now -- my pose model isn't loaded.")
+        if self._follow is not None and self._follow.active:
+            self._follow.stop()
+
+        capture = self._robot.capture_image("front")
+        if not capture.ok or not capture.image_jpeg:
+            return fail(f"I couldn't get a camera frame. {capture.message}")
+
+        try:
+            reading = self._pose_reader(capture.image_jpeg)
+        except Exception as exc:
+            LOGGER.warning("pose read failed", exc_info=True)
+            return fail(f"I couldn't read the gesture. {type(exc).__name__}.")
+
+        if reading is None:
+            return fail(
+                "I can't see anyone pointing. Hold your arm out towards where "
+                "you want me and ask again."
+            )
+
+        measured = None
+        try:
+            measured = self._robot.measure_distance(reading.bearing_deg)
+        except Exception:
+            LOGGER.debug("depth measurement failed", exc_info=True)
+        reading = apply_measured_distance(reading, measured)
+
+        if reading.distance_m < 0.3:
+            return fail(
+                f"You're pointing {reading.describe()}, but there's something in "
+                "the way. I'll stay here."
+            )
+
+        # Say it before doing it: the bearing can be misread, and hearing the
+        # interpretation is what lets the operator stop it.
+        summary = f"You're pointing {reading.describe()}. Going there."
+        if self._speak is not None:
+            try:
+                self._speak(summary)
+            except Exception:
+                LOGGER.debug("could not announce the gesture", exc_info=True)
+
+        if abs(reading.bearing_deg) >= 8:
+            turn = self._robot.move(
+                direction="turn_left" if reading.bearing_deg > 0 else "turn_right",
+                degrees=abs(reading.bearing_deg),
+            )
+            if not turn.ok:
+                return turn
+
+        walk = self._robot.move(direction="forward", distance_m=reading.distance_m)
+        if not walk.ok:
+            return walk
+        return ActionResult(
+            True,
+            f"I'm where you pointed, {reading.describe()}.",
+            {
+                "bearing_deg": round(reading.bearing_deg, 1),
+                "distance_m": round(reading.distance_m, 2),
+                "distance_measured": reading.distance_measured,
+                "arm": reading.arm,
+                "confidence": round(reading.confidence, 2),
+            },
         )
 
     def _navigate_to(self, arguments: dict[str, Any]) -> ActionResult:

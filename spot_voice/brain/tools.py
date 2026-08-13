@@ -102,6 +102,18 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "go_where_pointed",
+        "description": (
+            "Look for the operator pointing, work out the direction, measure how "
+            "far the floor is clear that way, and walk there. Use this when they "
+            "say something like 'stand over there', 'go that way' or 'wait here' "
+            "while gesturing. Spot says what it understood before it moves, so a "
+            "misread is corrected rather than acted on blindly. If nobody is "
+            "pointing it says so -- ask them to hold their arm out and try again."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
         "name": "navigate_to",
         "description": (
             "Autonomously walk to a named waypoint on the facility map using "
