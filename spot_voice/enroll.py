@@ -38,6 +38,10 @@ SAMPLE_COUNT = 5
 #: Gap between samples, so you have time to shift position slightly.
 SAMPLE_GAP_SEC = 1.2
 
+#: Pause after standing, so frames are taken from a settled robot rather than
+#: one still rising -- mid-rise frames are tilted and motion-blurred.
+STAND_SETTLE_SEC = 2.0
+
 
 #: What to do between samples, so the samples actually differ. Variety in angle
 #: is what makes acquisition work in whatever pose you happen to be standing.
@@ -76,6 +80,44 @@ def _robot_frames(robot, count: int, gap: float, console: Console):
             console.print("[yellow]  could not decode that frame[/yellow]")
             continue
         yield frame
+
+
+def _ensure_standing(robot, console: Console) -> int | None:
+    """Get Spot upright before sampling. Returns an exit code on failure.
+
+    A sitting Spot has its front cameras at about knee height, aimed down. A
+    person standing a metre away is then simply not in the picture, and every
+    sample comes back "no face found" while the operator is doing everything
+    right. The first run of this hit exactly that, and the advice it printed --
+    stand closer, better light -- sent them looking in the wrong place entirely.
+
+    Docked is left alone rather than auto-undocked: driving off a charger is a
+    bigger action than standing up, and it should be an explicit request.
+    """
+    try:
+        if robot.is_docked():
+            console.print(
+                "[red]Spot is on the dock.[/red] Undock it first -- on the dock "
+                "its cameras are low and pointing the wrong way.\n"
+                "Say 'undock' in the voice loop, or use the tablet."
+            )
+            return 2
+    except Exception:
+        LOGGER.debug("dock state unavailable", exc_info=True)
+
+    console.print("Standing Spot up so its cameras are at head height...")
+    try:
+        result = robot.stand()
+    except Exception as exc:
+        console.print(f"[red]Could not stand Spot up: {exc}[/red]")
+        return 1
+    if not result.ok:
+        console.print(f"[red]Could not stand Spot up: {result.message}[/red]")
+        return 1
+
+    # Settling takes a moment; sampling mid-rise gets a tilted, blurred frame.
+    time.sleep(STAND_SETTLE_SEC)
+    return None
 
 
 def enroll(
@@ -127,6 +169,10 @@ def enroll(
         console.print(f"[red]Could not start the face recogniser: {exc}[/red]")
         return 1
 
+    posture = _ensure_standing(robot, console)
+    if posture is not None:
+        return posture
+
     store = FaceStore(config.face_store_path)
     console.print(
         f"Enrolling [bold]{name}[/bold] from Spot's front camera.\n"
@@ -162,10 +208,15 @@ def enroll(
 
     if captured == 0:
         console.print(
-            "\n[red]No usable samples.[/red] Spot's fisheye cameras are wide-angle "
-            "and greyscale, so faces need to be close and well lit: stand about a "
-            "metre away, face the robot square on, and make sure nobody else is in "
-            "shot."
+            "\n[red]No usable samples.[/red] In rough order of likelihood:\n"
+            "  1. Spot was not upright, so its cameras were aimed at the floor. "
+            "Check it is standing, not sitting or lying down.\n"
+            "  2. You were too far away. Spot's fisheye lenses are very "
+            "wide-angle, so a face shrinks fast with distance -- stand about a "
+            "metre away, square on to the front of the robot.\n"
+            "  3. Too little light, or you were lit from behind.\n"
+            "  4. Somebody else was in shot, which is skipped deliberately "
+            "rather than risk enrolling the wrong face."
         )
         return 1
 
