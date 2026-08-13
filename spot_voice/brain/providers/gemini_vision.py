@@ -34,22 +34,11 @@ class GeminiVisionProvider(VisionProvider):
 
     name = "gemini"
 
-    #: What a Google AI Studio key looks like. Keys that do not start this way
-    #: are usually OAuth tokens or service-account credentials, which this SDK
-    #: does not accept -- worth saying plainly rather than failing at call time.
-    KEY_PREFIX = "AIza"
-
     def __init__(self, api_key: str, model: str) -> None:
+        # Note: keys come in more than one shape. An "AQ."-prefixed key
+        # authenticates just as well as the "AIza" ones AI Studio hands out, so
+        # do not warn on the prefix -- it only produces false alarms.
         import google.generativeai as genai
-
-        if not api_key.startswith(self.KEY_PREFIX):
-            LOGGER.warning(
-                "GEMINI_API_KEY does not look like an AI Studio key (expected it "
-                "to start with %r, got %r...). Get one from "
-                "https://aistudio.google.com/apikey",
-                self.KEY_PREFIX,
-                api_key[:6],
-            )
 
         genai.configure(api_key=api_key)
         self._genai = genai
@@ -76,6 +65,28 @@ class GeminiVisionProvider(VisionProvider):
         return text
 
 
+def list_available_models() -> list[str]:
+    """Model ids this key can actually use, newest-looking first.
+
+    Asking beats guessing: the ids move faster than any list hardcoded here,
+    and a wrong id and a bad key produce near-identical errors.
+    """
+    try:
+        import google.generativeai as genai
+
+        names = [
+            model.name.removeprefix("models/")
+            for model in genai.list_models()
+            if "generateContent" in getattr(model, "supported_generation_methods", [])
+        ]
+    except Exception:
+        LOGGER.debug("could not list Gemini models", exc_info=True)
+        return []
+    # Prefer flash variants: this runs on a robot, so latency matters more than
+    # the last few points of quality on a "what do you see".
+    return sorted(names, key=lambda name: (0 if "flash" in name else 1, name))
+
+
 def explain_gemini_error(exc: BaseException) -> str:
     """Turn a Gemini failure into something that names the actual fix.
 
@@ -94,6 +105,12 @@ def explain_gemini_error(exc: BaseException) -> str:
             "or the Generative Language API may not be enabled on it."
         )
     if "not found" in text or "404" in text:
+        available = list_available_models()
+        if available:
+            return (
+                "Gemini does not have that model. Set GEMINI_MODEL to one of: "
+                + ", ".join(available[:6])
+            )
         return (
             "Gemini does not recognise that model id. Check GEMINI_MODEL against "
             "https://ai.google.dev/gemini-api/docs/models"
