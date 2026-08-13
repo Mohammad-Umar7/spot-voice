@@ -600,7 +600,12 @@ def run_enrollment(config: Config, name: str, console: Console) -> int:
 
 def print_find_robot(config: Config, console: Console) -> int:
     """Sweep the configured subnet for anything answering on Spot's API port."""
-    from .preflight import SPOT_API_PORT, find_robots, subnet_of
+    from .preflight import (
+        SPOT_API_PORT,
+        candidate_addresses,
+        find_robots,
+        subnet_of,
+    )
 
     subnet = subnet_of(config.spot_ip)
     if subnet is None:

@@ -306,3 +306,49 @@ def test_tls_identity_returns_none_rather_than_raising(monkeypatch):
 
     monkeypatch.setattr(socket, "create_connection", refuse)
     assert tls_identity("192.168.33.1") is None
+
+
+def test_a_22_prefix_sweeps_all_four_blocks():
+    # BRIDGE-TRAINING is a /22: the robot can land anywhere from 192.168.32.1
+    # to 192.168.35.254. Sweeping only the /24 it sits on today would miss it
+    # the morning DHCP moves it a block over.
+    from spot_voice.preflight import candidate_addresses
+
+    hosts = candidate_addresses("192.168.33.137", prefix_length=22)
+
+    assert hosts[0] == "192.168.32.1"
+    assert hosts[-1] == "192.168.35.254"
+    assert "192.168.33.137" in hosts
+    assert "192.168.34.50" in hosts  # the block a /24 sweep would have missed
+    assert len(hosts) == 1022
+
+
+def test_a_24_prefix_stays_within_its_block():
+    from spot_voice.preflight import candidate_addresses
+
+    hosts = candidate_addresses("192.168.33.137", prefix_length=24)
+    assert hosts[0] == "192.168.33.1"
+    assert hosts[-1] == "192.168.33.254"
+    assert "192.168.34.50" not in hosts
+
+
+def test_an_absurdly_wide_prefix_is_refused_rather_than_attempted():
+    from spot_voice.preflight import candidate_addresses
+
+    assert candidate_addresses("192.168.33.137", prefix_length=8) == []
+
+
+def test_results_sort_numerically_across_blocks():
+    from spot_voice.preflight import find_robots
+
+    live = {"192.168.34.5", "192.168.33.200", "192.168.32.9"}
+    import spot_voice.preflight as pf
+
+    original = pf.can_reach
+    pf.can_reach = lambda host, _port, timeout=0.0: (host in live, "")
+    try:
+        found = find_robots("192.168.33", candidates=sorted(live), workers=4)
+    finally:
+        pf.can_reach = original
+
+    assert found == ["192.168.32.9", "192.168.33.200", "192.168.34.5"]

@@ -46,6 +46,9 @@ class Config:
 
     # --- Robot -------------------------------------------------------------
     spot_ip: str
+    #: CIDR prefix length of the robot's network. BRIDGE-TRAINING is a /22, so
+    #: a /24 sweep would miss the robot whenever DHCP moves it a block over.
+    spot_subnet_prefix: int
     dock_id: int | None
     graph_path: Path | None
     mock_robot: bool
@@ -164,6 +167,7 @@ def load_config(env_file: str | os.PathLike[str] | None = None) -> Config:
 
     cfg = Config(
         spot_ip=spot_ip,
+        spot_subnet_prefix=_as_int(os.getenv("SPOT_SUBNET_PREFIX"), 22) or 22,
         dock_id=_as_int(os.getenv("DOCK_ID"), None),
         graph_path=Path(graph_raw).expanduser() if graph_raw else None,
         mock_robot=mock,

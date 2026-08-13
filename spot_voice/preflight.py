@@ -292,11 +292,35 @@ def subnet_of(address: str) -> str | None:
     return ".".join(parts[:3])
 
 
+def candidate_addresses(address: str, prefix_length: int = 24) -> list[str]:
+    """Every usable host address in the network containing ``address``.
+
+    The prefix length matters and is easy to get wrong. BRIDGE-TRAINING hands
+    out a **/22**, so the robot can land anywhere from 192.168.32.1 to
+    192.168.35.254 -- sweeping only the /24 it happens to be on today would
+    quietly miss it the morning DHCP moves it one block over.
+    """
+    import ipaddress
+
+    host = _host_of(address)
+    if not host:
+        return []
+    try:
+        network = ipaddress.ip_network(f"{host}/{prefix_length}", strict=False)
+    except ValueError:
+        return []
+    if network.num_addresses > 4096:
+        # Refuse to sweep something enormous by accident.
+        return []
+    return [str(candidate) for candidate in network.hosts()]
+
+
 def find_robots(
     subnet: str,
     port: int = SPOT_API_PORT,
     timeout: float = SCAN_TIMEOUT_SEC,
     workers: int = SCAN_WORKERS,
+    candidates: list[str] | None = None,
 ) -> list[str]:
     """Sweep a /24 for hosts answering on Spot's API port.
 
@@ -314,8 +338,10 @@ def find_robots(
         Addresses that accepted a connection, in numeric order.
     """
     from concurrent.futures import ThreadPoolExecutor
+    import ipaddress
 
-    candidates = [f"{subnet}.{host}" for host in range(1, 255)]
+    if candidates is None:
+        candidates = [f"{subnet}.{host}" for host in range(1, 255)]
 
     def probe(address: str) -> str | None:
         reachable, _detail = can_reach(address, port, timeout=timeout)
@@ -323,7 +349,7 @@ def find_robots(
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         found = [result for result in pool.map(probe, candidates) if result]
-    return sorted(found, key=lambda address: int(address.rsplit(".", 1)[1]))
+    return sorted(found, key=lambda address: ipaddress.ip_address(address))
 
 
 #: Strings in a TLS certificate that suggest the host really is a Spot rather
