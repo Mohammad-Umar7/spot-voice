@@ -20,8 +20,6 @@ EXPECTED_TOOLS = {
     "stand",
     "sit",
     "move",
-    "go_where_pointed",
-    "come_here",
     "navigate_to",
     "list_waypoints",
     "capture_image",

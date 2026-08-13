@@ -30,6 +30,15 @@ LOGGER = logging.getLogger(__name__)
 #: Frames buffered between the audio callback and the worker (~10 s).
 _QUEUE_MAX = 500
 
+#: Utterances allowed to wait for transcription at once. Deliberately tiny --
+#: a queue of pending robot commands is not a feature.
+UTTERANCE_QUEUE_MAX = 2
+
+#: Beyond this an utterance is discarded unheard. A command recorded this long
+#: ago no longer describes what the operator wants: they have moved, or already
+#: said it again. Acting on it late is worse than missing it.
+MAX_UTTERANCE_AGE_SEC = 12.0
+
 
 class Listener:
     """Captures speech and hands finished transcripts to a callback.
@@ -58,8 +67,15 @@ class Listener:
         self._stop = threading.Event()
         self._muted = threading.Event()
         self._worker: threading.Thread | None = None
+        # Utterances waiting to be transcribed. Small: the point is to keep the
+        # audio thread free, not to build a backlog nobody wants acted on.
+        self._utterances: queue.Queue[tuple[float, bytes]] = queue.Queue(
+            maxsize=UTTERANCE_QUEUE_MAX
+        )
+        self._stt_worker: threading.Thread | None = None
         self._stream = None
         self._dropped = 0
+        self._stale = 0
 
     # ------------------------------------------------------------------
 
@@ -110,8 +126,14 @@ class Listener:
         )
         self._stream.start()
 
-        self._worker = threading.Thread(target=self._run, name="stt-worker", daemon=True)
+        self._worker = threading.Thread(
+            target=self._run, name="audio-segmenter", daemon=True
+        )
         self._worker.start()
+        self._stt_worker = threading.Thread(
+            target=self._transcribe_loop, name="stt-worker", daemon=True
+        )
+        self._stt_worker.start()
         LOGGER.info("Listening on %s", device_label)
 
     def stop(self) -> None:
@@ -127,6 +149,11 @@ class Listener:
         if self._worker is not None:
             self._worker.join(timeout=3.0)
             self._worker = None
+        if self._stt_worker is not None:
+            self._stt_worker.join(timeout=3.0)
+            self._stt_worker = None
+        if self._stale:
+            LOGGER.info("Skipped %d utterance(s) that went stale in the queue", self._stale)
         if self._dropped:
             LOGGER.info("Dropped %d audio frames while the queue was full", self._dropped)
 
@@ -144,7 +171,17 @@ class Listener:
             self._dropped += 1
 
     def _run(self) -> None:
-        """Segment frames into utterances and transcribe them."""
+        """Segment frames into utterances. Never transcribes -- see below.
+
+        This thread must not block. It is the only thing draining the audio
+        queue, and transcription takes seconds: with both jobs on one thread the
+        queue filled while Whisper worked and PortAudio's callback threw frames
+        away. A real session logged 2150 dropped frames -- 43 seconds of speech
+        that never reached the transcriber at all, which read from outside as
+        the robot ignoring people.
+
+        So segmentation stays here, and transcription happens on its own thread.
+        """
         while not self._stop.is_set():
             try:
                 frame = self._queue.get(timeout=0.2)
@@ -156,7 +193,42 @@ class Listener:
             for utterance in self._segmenter.push(frame):
                 if self._stop.is_set() or self._muted.is_set():
                     continue
-                self._handle_utterance(utterance)
+                self._enqueue_utterance(utterance)
+
+    def _enqueue_utterance(self, pcm: bytes) -> None:
+        """Hand one utterance to the transcriber, dropping the oldest if behind.
+
+        Bounded and oldest-first on purpose. If transcription falls behind, the
+        useful utterance is the newest one: acting on a command recorded thirty
+        seconds ago is worse than missing it, because the operator has moved on
+        and the robot has not.
+        """
+        while True:
+            try:
+                self._utterances.put_nowait((time.monotonic(), pcm))
+                return
+            except queue.Full:
+                try:
+                    self._utterances.get_nowait()
+                    self._stale += 1
+                except queue.Empty:
+                    return
+
+    def _transcribe_loop(self) -> None:
+        """Transcribe queued utterances, skipping any that went stale waiting."""
+        while not self._stop.is_set():
+            try:
+                queued_at, pcm = self._utterances.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if self._stop.is_set():
+                return
+            waited = time.monotonic() - queued_at
+            if waited > MAX_UTTERANCE_AGE_SEC:
+                LOGGER.info("Dropping an utterance that waited %.1fs to be heard", waited)
+                self._stale += 1
+                continue
+            self._handle_utterance(pcm)
 
     def _handle_utterance(self, pcm: bytes) -> None:
         """Transcribe one utterance and forward it."""
