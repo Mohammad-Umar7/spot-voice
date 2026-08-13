@@ -591,14 +591,6 @@ def run_vision_test(config: Config, console: Console) -> int:
         + (f" ({config.gemini_model})" if config.vision_provider == "gemini" else "")
     )
 
-    if config.vision_provider == "gemini" and not config.gemini_api_key.startswith("AIza"):
-        console.print(
-            f"\n[yellow]Heads up: GEMINI_API_KEY starts with "
-            f"{config.gemini_api_key[:6]!r}.[/yellow] Google AI Studio keys start "
-            "with 'AIza'. If this call fails, that is almost certainly why -- "
-            "get a key from https://aistudio.google.com/apikey\n"
-        )
-
     vision = build_vision_provider(config)
     if vision is None:
         console.print(
