@@ -101,6 +101,7 @@ class VoiceApp:
             speak=lambda text: self.speaker.speak(text),
             console=self.console,
             pose_reader=self._read_pointing,
+            describe_image=self._describe_frame,
         )
         self._pose_model: Any = None
         self.brain: Any = None
@@ -121,6 +122,23 @@ class VoiceApp:
         self._shutdown = threading.Event()
 
     # ------------------------------------------------------------------
+
+    def _describe_frame(self, frame_jpeg: bytes) -> str:
+        """Describe one frame in words, for tools that produce several.
+
+        The agent already routes a single tool image through the vision
+        provider, but scan_room returns one frame per heading and the
+        tool_result format carries only one. So the scan captions its own.
+        """
+        brain = self.brain
+        vision = getattr(brain, "_vision", None) if brain is not None else None
+        if vision is None:
+            return ""
+        return vision.describe(
+            frame_jpeg,
+            "List what you can see, especially people, equipment and exits. "
+            "Be brief and factual. Do not guess at anything out of frame.",
+        )
 
     def _read_pointing(self, frame_jpeg: bytes):
         """Read a pointing gesture from a frame, loading the model on first use.

@@ -22,6 +22,16 @@ from .tools import TOOL_NAMES
 
 LOGGER = logging.getLogger(__name__)
 
+#: How many headings a 360 scan looks from. One front frame covers roughly a
+#: 100 degree wedge, so four gives full cover with a little overlap -- and each
+#: extra heading costs a turn plus a vision call, which the operator waits out.
+SCAN_HEADINGS = 4
+
+#: Pause after each turn so the frame is taken from a settled body rather than
+#: one still swaying, which blurs it and loses small detections.
+SCAN_SETTLE_SEC = 0.8
+
+
 
 @dataclass
 class DispatchResult:
@@ -76,11 +86,16 @@ class ToolDispatcher:
         speak: Callable[[str], None] | None = None,
         console: Console | None = None,
         pose_reader: Callable[[bytes], Any] | None = None,
+        describe_image: Callable[[bytes], str] | None = None,
     ) -> None:
         self._robot = robot
         self._follow = follow
         self._speak = speak
         self._console = console or Console()
+        # Turns one frame into words. Needed by scan_room, which produces
+        # several frames in a single call and so cannot use the agent's
+        # one-image-per-tool-result path.
+        self._describe_image = describe_image
         # Reads a pointing gesture from a JPEG. Injected so the pose model is
         # only loaded when something actually needs it.
         self._pose_reader = pose_reader
@@ -97,6 +112,7 @@ class ToolDispatcher:
             "start_follow": self._start_follow,
             "stop_follow": self._stop_follow,
             "capture_image": self._capture_image,
+            "scan_room": self._scan_room,
             "get_status": self._get_status,
             "dock": self._dock,
             "undock": self._undock,
@@ -198,6 +214,92 @@ class ToolDispatcher:
             degrees=_as_number(arguments.get("degrees")),
             speed=_as_number(arguments.get("speed")),
         )
+
+    def _scan_room(self, arguments: dict[str, Any]) -> ActionResult:
+        """Turn on the spot, look at each heading, and report what is there.
+
+        One camera frame covers roughly a 100 degree wedge, so "what is in this
+        room" was previously unanswerable -- there was no tool for it, and the
+        model answered anyway. "Zero people in the room" was invented, not seen.
+
+        Two deliberate choices about counting. People are counted by the local
+        person detector rather than by asking the vision model how many it can
+        see: detectors are built for exactly that and vision models are famously
+        unreliable at counting. And the total is reported as a floor, "at least
+        N", because the headings overlap slightly and a person standing in the
+        seam appears twice -- claiming an exact count would be a false
+        precision that someone might act on.
+        """
+        if self._follow is not None and getattr(self._follow, "active", False):
+            self._follow.stop()
+
+        headings = SCAN_HEADINGS
+        seen: list[dict[str, Any]] = []
+        best_count = 0
+
+        for index in range(headings):
+            if index > 0:
+                turn = self._robot.move(
+                    direction="turn_left", degrees=360.0 / headings
+                )
+                if not turn.ok:
+                    return fail(f"I couldn't turn to look around. {turn.message}")
+                time.sleep(SCAN_SETTLE_SEC)  # let the body stop swaying
+
+            capture = self._robot.capture_image("front")
+            if not capture.ok or not capture.image_jpeg:
+                LOGGER.debug("scan frame %d failed: %s", index, capture.message)
+                continue
+
+            people = self._count_people(capture.image_jpeg)
+            description = ""
+            if self._describe_image is not None:
+                try:
+                    description = self._describe_image(capture.image_jpeg)
+                except Exception as exc:
+                    LOGGER.warning("scan description failed", exc_info=True)
+                    description = f"(could not describe: {type(exc).__name__})"
+
+            best_count = max(best_count, people if people is not None else 0)
+            entry: dict[str, Any] = {"heading_deg": round(index * 360.0 / headings)}
+            if people is not None:
+                entry["people_detected"] = people
+            if description:
+                entry["view"] = description
+            seen.append(entry)
+            self._console.print(
+                f"[blue]scan[/blue] [dim]{entry['heading_deg']}deg "
+                f"people={people} {description[:60]}[/dim]"
+            )
+
+        if not seen:
+            return fail("I turned all the way round but couldn't get any camera frames.")
+
+        total = sum(entry.get("people_detected", 0) for entry in seen)
+        return ok(
+            f"Looked all the way round from {len(seen)} headings.",
+            headings=seen,
+            people_seen_total=total,
+            people_note=(
+                "Counts come from a person detector, one frame per heading. "
+                "Headings overlap slightly, so report this as 'at least' rather "
+                "than an exact number, and say it is what you could see rather "
+                "than what is in the room."
+            ),
+        )
+
+    def _count_people(self, frame_jpeg: bytes) -> int | None:
+        """How many people the local detector finds. None if it cannot run."""
+        if self._follow is None:
+            return None
+        detector = getattr(self._follow, "person_detector", None)
+        if detector is None:
+            return None
+        try:
+            return len(detector.detect(frame_jpeg))
+        except Exception:
+            LOGGER.debug("person count failed", exc_info=True)
+            return None
 
     def _come_here(self, arguments: dict[str, Any]) -> ActionResult:
         """Walk to the operator and settle beside or in front of them.

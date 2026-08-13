@@ -591,6 +591,23 @@ class FollowController:
             LOGGER.warning("Face recognition unavailable (%s)", exc, exc_info=True)
             return None, None
 
+    @property
+    def person_detector(self):
+        """The person detector, built on demand. None if unavailable.
+
+        Shared with scan_room so counting people uses the same detector that
+        does the following, rather than asking a vision model to count -- which
+        they are notoriously poor at.
+        """
+        with self._lock:
+            if self._standalone_detector is None:
+                try:
+                    self._standalone_detector = self._detector_factory()
+                except Exception:
+                    LOGGER.warning("detector unavailable", exc_info=True)
+                    return None
+            return self._standalone_detector
+
     def locate_operator(self) -> tuple[float, float] | None:
         """One-shot "where is the person", as ``(bearing_deg, distance_m)``.
 

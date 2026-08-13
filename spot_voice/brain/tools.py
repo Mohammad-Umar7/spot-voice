@@ -220,6 +220,22 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "scan_room",
+        "description": (
+            "Turn all the way round, look at each heading, and report what is "
+            "there. Use for 'scan the room', 'how many people are here', "
+            "'what's around you', 'look around'. One camera frame only covers "
+            "about a hundred degrees, so this is the ONLY way to answer a "
+            "question about the whole room -- a single capture_image cannot, "
+            "and you must never answer such a question without calling this. "
+            "Takes around twenty seconds because the robot physically turns. "
+            "People counts come from a detector, and headings overlap, so "
+            "report the number as 'at least N that I could see', never as an "
+            "exact count of the room."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
         "name": "get_status",
         "description": (
             "Report battery percentage, motor power, lease and e-stop state, "

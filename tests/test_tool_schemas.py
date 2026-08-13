@@ -27,6 +27,7 @@ EXPECTED_TOOLS = {
     "start_follow",
     "stop_follow",
     "capture_image",
+    "scan_room",
     "get_status",
     "dock",
     "undock",
