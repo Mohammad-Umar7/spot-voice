@@ -33,6 +33,7 @@ from .config import Config, ConfigError, load_config
 from .robot.base import RobotInterface
 from .robot.follow import FollowController, make_detector_factory
 from .safety.reflex import ReflexEngine
+from .wake import WakeGate
 from .tts.speaker import Speaker
 
 LOGGER = logging.getLogger("spot_voice")
@@ -108,6 +109,11 @@ class VoiceApp:
             follow=self.follow,
             say=lambda text: self.speaker.speak(text),
             on_abort=self._abort_brain,
+        )
+        self.wake = WakeGate(
+            wake_word=config.wake_word,
+            follow_up_sec=config.wake_follow_up_sec,
+            enabled=config.require_wake_word,
         )
 
         self.listener: Any = None
@@ -347,6 +353,23 @@ class VoiceApp:
             )
             return
 
+        # Addressing. Below the reflex lane on purpose: safety words are already
+        # handled above and must never need the robot's name, but a *command*
+        # does, otherwise every sentence spoken near the microphone is one.
+        address = self.wake.check(text)
+        if not address.addressed:
+            self.console.print(
+                f"[dim]not for me: {text}[/dim]"
+                if self.wake.enabled
+                else f"[dim]{text}[/dim]"
+            )
+            return
+        if address.is_bare_name:
+            self.speaker.speak("Yes?")
+            self.wake.note_reply()
+            return
+        text = address.command
+
         if self.brain is None:
             self.speaker.speak("I don't have my language service, but stop and sit still work.")
             return
@@ -366,6 +389,7 @@ class VoiceApp:
                 return
             if reply.text:
                 self.speaker.speak(reply.text)
+                self.wake.note_reply()
         finally:
             self._busy.release()
 

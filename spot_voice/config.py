@@ -40,6 +40,16 @@ def _as_int(raw: str | None, default: int | None) -> int | None:
         return default
 
 
+def _as_float(raw: str | None, default: float) -> float:
+    """Parse an optional float, returning ``default`` when unset or malformed."""
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw.strip())
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True)
 class Config:
     """Immutable snapshot of the runtime configuration."""
@@ -72,6 +82,16 @@ class Config:
     operator_name: str
     #: Whether to use face recognition at all.
     face_recognition: bool
+
+    # --- Addressing --------------------------------------------------------
+    #: The name a command must start with. Safety words never need it.
+    wake_word: str
+    #: Whether the name is required at all. False restores the old behaviour of
+    #: treating every heard sentence as a command.
+    require_wake_word: bool
+    #: Seconds after a reply during which a follow-up needs no name. Zero means
+    #: always require it, which is the safer default around other people.
+    wake_follow_up_sec: float
 
     # --- Audio in ----------------------------------------------------------
     mic_device_name: str
@@ -138,6 +158,14 @@ class Config:
                 (self.operator_name or "whoever is in front")
                 + ("" if self.face_recognition else " (face recognition off)"),
             ),
+            (
+                "address as",
+                (
+                    f'"{self.wake_word}, ..." (safety words never need it)'
+                    if self.require_wake_word
+                    else "anything you say (no name needed)"
+                ),
+            ),
             ("mic", self.mic_device_name or "<system default>"),
             ("whisper model", self.whisper_model),
             ("tts", f"{self.tts_engine} -> {self.audio_out}"),
@@ -181,6 +209,9 @@ def load_config(env_file: str | os.PathLike[str] | None = None) -> Config:
         groq_model=(os.getenv("GROQ_MODEL") or "llama-3.3-70b-versatile").strip(),
         gemini_api_key=(os.getenv("GEMINI_API_KEY") or "").strip(),
         gemini_model=(os.getenv("GEMINI_MODEL") or "gemini-2.0-flash").strip(),
+        wake_word=(os.getenv("WAKE_WORD") or "spot").strip().lower(),
+        require_wake_word=_as_bool(os.getenv("REQUIRE_WAKE_WORD"), default=True),
+        wake_follow_up_sec=_as_float(os.getenv("WAKE_FOLLOW_UP_SEC"), 0.0),
         mic_device_name=(os.getenv("MIC_DEVICE_NAME") or "").strip(),
         whisper_model=(os.getenv("WHISPER_MODEL") or "base").strip(),
         stt_language=(os.getenv("STT_LANGUAGE") or "en").strip(),
