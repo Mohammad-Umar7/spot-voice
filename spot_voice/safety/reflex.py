@@ -176,6 +176,25 @@ def _best_window_score(
     return best_average, best_minimum
 
 
+#: Words that turn "sit" from a posture into a destination.
+#:
+#: "Sit" means settle where you are. "Sit beside me" means walk over here and
+#: then settle -- a different action with a different tool behind it. The reflex
+#: lane matches by containment, so without this it sees the word "sit", fires
+#: instantly, and the robot sits exactly where it was standing.
+#:
+#: Applied to the sit rule **only**. "Stop here" and "stop over there" are still
+#: stops, and must never be deferred to a model round-trip for any reason.
+PLACEMENT_WORDS = frozenset(
+    {"here", "there", "beside", "next", "near", "by", "with", "over", "alongside"}
+)
+
+
+def _mentions_a_place(tokens: Sequence[str]) -> bool:
+    """True when the utterance names somewhere to go, not just a posture."""
+    return any(token in PLACEMENT_WORDS for token in tokens)
+
+
 def match_reflex(
     transcript: str, rules: Sequence[ReflexRule] = REFLEX_RULES
 ) -> ReflexMatch | None:
@@ -191,6 +210,12 @@ def match_reflex(
     tokens = normalise(transcript)
     if not tokens:
         return None
+
+    # "Sit beside me" is a walking instruction wearing the word "sit". Hand it
+    # to the model, which has come_here. Stopping is never reinterpreted this
+    # way -- see PLACEMENT_WORDS.
+    if _mentions_a_place(tokens):
+        rules = tuple(rule for rule in rules if rule.action is not ReflexAction.SIT)
 
     # Pass 1: exact containment. Cheap, and covers the overwhelming majority.
     for rule in rules:

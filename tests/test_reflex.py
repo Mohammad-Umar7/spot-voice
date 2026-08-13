@@ -215,3 +215,61 @@ def test_engine_works_without_any_network_dependency():
     # it with no brain, no speaker and no follow controller still works.
     engine = ReflexEngine(FakeRobot())
     assert engine.handle("freeze") is not None
+
+
+# ----------------------------------------------------------------------
+# "Sit" versus "sit beside me"
+#
+# The reflex lane matches by containment, so the word "sit" inside a longer
+# sentence used to fire the instant sit -- and "sit beside me" made the robot
+# sit exactly where it was standing instead of walking over. Caught by running
+# the real command end to end, not by any unit test that existed at the time.
+
+
+def test_a_bare_posture_command_still_reflexes():
+    for phrase in ("sit", "sit down", "lie down", "take a seat"):
+        match = match_reflex(phrase)
+        assert match is not None and match.action is ReflexAction.SIT, phrase
+
+
+def test_sitting_somewhere_is_a_walking_instruction_and_goes_to_the_model():
+    for phrase in (
+        "sit beside me",
+        "sit next to me",
+        "sit here",
+        "come here and sit",
+        "sit over there",
+    ):
+        assert match_reflex(phrase) is None, phrase
+
+
+def test_stopping_is_never_reinterpreted_as_a_destination():
+    """The whole exemption applies to sit only.
+
+    "Stop here" is a stop. Deferring any stop to a model round-trip to work out
+    whether a place was meant would be indefensible, so placement words must
+    not touch the stop rules at all.
+    """
+    for phrase in (
+        "stop",
+        "stop here",
+        "stop over there",
+        "stop right here",
+        "freeze here",
+        "halt there",
+    ):
+        match = match_reflex(phrase)
+        assert match is not None, phrase
+        assert match.action is ReflexAction.STOP, phrase
+
+
+def test_stop_following_still_wins_over_the_broader_stop():
+    for phrase in ("stop following me", "stay there"):
+        match = match_reflex(phrase)
+        assert match is not None and match.action is ReflexAction.STOP_FOLLOW, phrase
+
+
+def test_the_robots_name_never_blocks_a_safety_word():
+    """Addressing is checked after the reflex lane, so a name is just noise here."""
+    for phrase in ("spot stop", "hey spot freeze", "spot sit"):
+        assert match_reflex(phrase) is not None, phrase
