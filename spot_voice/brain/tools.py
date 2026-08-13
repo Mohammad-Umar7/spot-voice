@@ -282,3 +282,85 @@ def tools_with_cache_breakpoint() -> list[dict[str, Any]]:
     cached = [dict(tool) for tool in TOOLS]
     cached[-1]["cache_control"] = {"type": "ephemeral"}
     return cached
+
+
+# ----------------------------------------------------------------------
+# Compact tool schemas, for providers without prompt caching
+# ----------------------------------------------------------------------
+#
+# The descriptions above are written for Anthropic, where the whole prefix is
+# cached and costs almost nothing after the first turn -- so detail is free and
+# improves tool choice. On Groq there is no caching: all 16 schemas are re-sent
+# every request, ~1850 tokens against a 12,000/minute limit, which is four
+# requests a minute. One spoken sentence can take three. That is what made the
+# robot feel broken rather than slow.
+#
+# These say the same things in a fraction of the words: when to call it, and the
+# one constraint that matters. Nothing safety-relevant lives here anyway -- the
+# caps are enforced in the robot layer whatever the model asks for.
+
+COMPACT_DESCRIPTIONS: dict[str, str] = {
+    "power_on": "Motors on, posture unchanged. Rarely needed alone.",
+    "stand": "Stand up, powering motors if needed. Needed before moving.",
+    "sit": "Sit down.",
+    "emote": "Body-language gesture: " + " | ".join(GESTURES) + ". Use for greetings and reactions.",
+    "move": (
+        f"Walk a short distance or turn in place. direction is one of "
+        f"{'/'.join(MOVE_DIRECTIONS)}. distance_m for straight moves (max "
+        f"{MAX_MOVE_DISTANCE_M}), degrees for turns. For travelling somewhere "
+        "named, use navigate_to."
+    ),
+    "go_where_pointed": "Walk where the operator is pointing. Use for 'over there' or 'that way'.",
+    "navigate_to": "Walk to a named map waypoint. Use list_waypoints if unsure of the name.",
+    "list_waypoints": "Names of places on the map.",
+    "start_follow": "Start following the operator. Tell them to stand in front of you.",
+    "stop_follow": "Stop following and hold position.",
+    "capture_image": "Take a photo and see it. Use for 'what do you see'. Describe only what is there.",
+    "get_status": "Battery, motor power, e-stop, dock and localization.",
+    "dock": "Return to the charging dock.",
+    "undock": "Step off the dock. If not docked, use stand instead.",
+    "speak": "Almost never needed -- your reply is already spoken aloud. Only for a progress note mid-walk.",
+    "stop_all": "Cancel everything and stop safely.",
+}
+
+
+def compact_tools() -> list[dict[str, Any]]:
+    """The same tools with terse descriptions, for rate-limited providers."""
+    trimmed: list[dict[str, Any]] = []
+    for tool in TOOLS:
+        copy = dict(tool)
+        description = COMPACT_DESCRIPTIONS.get(tool["name"])
+        if description:
+            copy["description"] = description
+        copy["input_schema"] = _compact_schema(tool["input_schema"])
+        trimmed.append(copy)
+    return trimmed
+
+
+def _compact_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Drop per-parameter prose, keeping types, enums and what is required.
+
+    The enum values are what actually constrain the model; the sentences
+    explaining them are what cost the tokens.
+    """
+    properties = {}
+    for name, prop in schema.get("properties", {}).items():
+        slim = {key: value for key, value in prop.items() if key != "description"}
+        properties[name] = slim
+    return {
+        "type": schema.get("type", "object"),
+        "properties": properties,
+        "required": schema.get("required", []),
+    }
+
+
+def tools_for(provider) -> list[dict[str, Any]]:
+    """Pick the right tool schemas for a provider.
+
+    Caching providers get the detailed descriptions, because they are cached and
+    better descriptions mean better tool choice. Everyone else gets the compact
+    ones, because there the same detail is a per-request tax.
+    """
+    if getattr(provider, "supports_prompt_caching", False):
+        return tools_with_cache_breakpoint()
+    return compact_tools()

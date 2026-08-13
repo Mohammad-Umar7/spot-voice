@@ -176,8 +176,14 @@ class SpotClient(RobotInterface):
             self._connected = True
             LOGGER.info("Connected to Spot at %s", self._ip)
 
-    def _on_lease_lost(self) -> None:
+    def _on_lease_lost(self, exc: BaseException | None = None) -> None:
         """Called by the keep-alive when retaining the lease fails.
+
+        Takes the exception because that is how the SDK calls it --
+        ``self._retain_lease_failed_cb(exc)``. Getting this signature wrong is
+        not a cosmetic error: the callback runs inside the keep-alive thread,
+        so raising here kills that thread outright and the lease is never
+        retained again. A recoverable blip becomes a dead session.
 
         A ``LeaseUseError`` on retain means something else took control -- almost
         always the tablet, which grabs the lease whenever it is showing a drive
@@ -185,19 +191,24 @@ class SpotClient(RobotInterface):
         accepting them, so a `stand` reports success and nothing moves. That is
         far too confusing to leave as a warning buried in the log.
         """
-        with self._lock:
-            first = not self._lease_lost
-            self._lease_lost = True
-        if not first:
-            return  # the keep-alive retries every 2s; say it once
+        try:
+            with self._lock:
+                first = not self._lease_lost
+                self._lease_lost = True
+            if not first:
+                return  # the keep-alive retries every 2s; say it once
 
-        LOGGER.error("Lost the lease -- another controller has taken it")
-        if self._on_lease_conflict is not None:
-            self._on_lease_conflict(
-                "Something else has taken control of Spot. If the tablet is on a "
-                "drive or dock screen, back out of it -- it holds the lease and "
-                "my commands will be ignored."
-            )
+            LOGGER.error("Lost the lease -- another controller has taken it: %s", exc)
+            if self._on_lease_conflict is not None:
+                self._on_lease_conflict(
+                    "Something else has taken control of Spot. If the tablet is on "
+                    "a drive or dock screen, back out of it -- it holds the lease "
+                    "and my commands will be ignored."
+                )
+        except Exception:
+            # Swallow everything: this runs on the keep-alive thread, and an
+            # escape here stops the lease being retained at all.
+            LOGGER.exception("lease-loss notification failed")
 
     @property
     def lease_lost(self) -> bool:

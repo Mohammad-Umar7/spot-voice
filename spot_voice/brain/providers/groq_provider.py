@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any
 
 from .base import (
@@ -62,6 +63,27 @@ class GroqProvider(LLMProvider):
     # ------------------------------------------------------------------
 
     def complete(
+        self,
+        system: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        messages: list[dict[str, Any]],
+        max_tokens: int,
+    ) -> ProviderResponse:
+        try:
+            return self._complete_once(system, tools, messages, max_tokens)
+        except Exception as exc:
+            wait = retry_after_seconds(exc)
+            if wait is None:
+                raise
+            # Groq's 429 says exactly how long to wait. Sitting out a short one
+            # and retrying beats making the operator repeat themselves -- but
+            # only a short one: a robot silent for fifteen seconds reads as
+            # broken.
+            LOGGER.info("Rate limited; waiting %.1fs and retrying once", wait)
+            time.sleep(wait)
+            return self._complete_once(system, tools, messages, max_tokens)
+
+    def _complete_once(
         self,
         system: list[dict[str, Any]],
         tools: list[dict[str, Any]],
@@ -111,6 +133,30 @@ class GroqProvider(LLMProvider):
 #: Groq returns this code when the model writes function-call syntax the API
 #: cannot parse. It is a property of the weaker model, not of the request.
 TOOL_USE_FAILED = "tool_use_failed"
+
+#: Longest 429 backoff worth waiting through inline. Beyond this the operator
+#: is better served by being told, so they can rephrase or wait deliberately.
+MAX_RATE_LIMIT_WAIT_SEC = 8.0
+
+
+def retry_after_seconds(exc: BaseException) -> float | None:
+    """How long Groq asked us to wait, when the error is a retryable 429.
+
+    Groq puts the exact delay in the message -- "Please try again in 14.68s" --
+    which is far more useful than a fixed backoff. Returns ``None`` when this is
+    not a rate limit, or when the wait is too long to sit through on a robot.
+    """
+    text = str(exc)
+    if "rate_limit" not in text and "429" not in text:
+        return None
+    match = re.search(r"try again in ([0-9.]+)\s*(ms|s)", text)
+    if not match:
+        return None
+    value = float(match.group(1))
+    seconds = value / 1000.0 if match.group(2) == "ms" else value
+    if seconds > MAX_RATE_LIMIT_WAIT_SEC:
+        return None
+    return seconds + 0.3  # a little margin, the limit is a moving window
 
 
 def salvage_failed_tool_call(exc: BaseException) -> ProviderResponse | None:

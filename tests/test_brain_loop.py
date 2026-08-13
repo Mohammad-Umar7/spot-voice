@@ -33,9 +33,17 @@ class FakeProvider(LLMProvider):
 
     name = "fake"
 
-    def __init__(self, script, supports_images: bool = True) -> None:
+    def __init__(
+        self,
+        script,
+        supports_images: bool = True,
+        supports_prompt_caching: bool = True,
+    ) -> None:
         self.script = list(script)
         self.supports_images = supports_images
+        # Decides whether the Brain sends the detailed prompt or the compact
+        # one, so tests have to be explicit about it.
+        self.supports_prompt_caching = supports_prompt_caching
         self.calls: list[dict] = []
 
     def complete(self, system, tools, messages, max_tokens):
@@ -98,8 +106,12 @@ def dispatcher():
     return ToolDispatcher(robot=robot, console=QUIET)
 
 
-def make_brain(dispatcher, script, supports_images=True, vision=None):
-    provider = FakeProvider(script, supports_images=supports_images)
+def make_brain(
+    dispatcher, script, supports_images=True, vision=None, caching=True
+):
+    provider = FakeProvider(
+        script, supports_images=supports_images, supports_prompt_caching=caching
+    )
     brain = Brain(provider=provider, dispatcher=dispatcher, vision=vision, console=QUIET)
     return brain, provider
 
@@ -303,3 +315,53 @@ def test_the_loop_cannot_run_away(dispatcher):
 
     assert len(provider.calls) == MAX_TOOL_ITERATIONS
     assert result.text
+
+
+# ----------------------------------------------------------------------
+# Prompt size is chosen per provider
+#
+# Groq has no prompt caching and a 12,000 token/minute free tier, while the full
+# prompt is ~2300 tokens -- four requests a minute, which one spoken sentence
+# can exhaust. The detailed prompt is for providers that cache it.
+
+
+def test_a_non_caching_provider_gets_a_much_smaller_prompt(dispatcher):
+    import json
+
+    caching, cached_provider = make_brain(dispatcher, [reply("hi")], caching=True)
+    caching.handle("hello")
+
+    lean, lean_provider = make_brain(dispatcher, [reply("hi")], caching=False)
+    lean.handle("hello")
+
+    def size(call):
+        return len(json.dumps(call["system"])) + len(json.dumps(call["tools"]))
+
+    big = size(cached_provider.calls[0])
+    small = size(lean_provider.calls[0])
+    assert small < big * 0.65, f"compact prompt is {small} vs {big}"
+
+
+def test_the_compact_prompt_keeps_every_tool_and_its_enums(dispatcher):
+    from spot_voice.brain.tools import TOOL_NAMES
+
+    brain, provider = make_brain(dispatcher, [reply("hi")], caching=False)
+    brain.handle("hello")
+
+    tools = provider.calls[0]["tools"]
+    assert {tool["name"] for tool in tools} == set(TOOL_NAMES)
+    # The enums are what actually constrain the model; only prose is dropped.
+    move = next(tool for tool in tools if tool["name"] == "move")
+    assert move["input_schema"]["properties"]["direction"]["enum"]
+    assert move["input_schema"]["required"] == ["direction"]
+
+
+def test_a_non_caching_provider_keeps_a_shorter_history(dispatcher):
+    from spot_voice.brain.agent import COMPACT_HISTORY_MESSAGES, MAX_HISTORY_MESSAGES
+
+    caching, _ = make_brain(dispatcher, [reply("x")], caching=True)
+    lean, _ = make_brain(dispatcher, [reply("x")], caching=False)
+
+    assert caching._max_history == MAX_HISTORY_MESSAGES
+    assert lean._max_history == COMPACT_HISTORY_MESSAGES
+    assert COMPACT_HISTORY_MESSAGES < MAX_HISTORY_MESSAGES

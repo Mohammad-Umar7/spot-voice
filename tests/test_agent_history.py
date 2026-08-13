@@ -85,6 +85,7 @@ def test_trimming_never_leaves_an_orphaned_tool_result_at_the_head():
 
     brain = Brain.__new__(Brain)  # no API client needed for the pure logic
     brain._messages = []
+    brain._max_history = MAX_HISTORY_MESSAGES
     for index in range(MAX_HISTORY_MESSAGES + 10):
         brain._messages.append({"role": "user", "content": f"turn {index}"})
         brain._messages.append(
@@ -108,6 +109,7 @@ def test_trimming_an_empty_history_is_safe():
 
     brain = Brain.__new__(Brain)
     brain._messages = []
+    brain._max_history = MAX_HISTORY_MESSAGES
     brain._trim()
     assert brain._messages == []
 

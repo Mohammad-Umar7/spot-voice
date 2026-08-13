@@ -33,12 +33,17 @@ from rich.console import Console
 from .dispatcher import DispatchResult, ToolDispatcher
 from .prompts import system_blocks
 from .providers import LLMProvider, VisionProvider
-from .tools import tools_with_cache_breakpoint
+from .tools import tools_for
 
 LOGGER = logging.getLogger(__name__)
 
 #: Roughly ten turns of conversation, counting tool round-trips.
 MAX_HISTORY_MESSAGES = 24
+
+#: History window for providers that re-send everything each request. Shorter
+#: because on Groq's free tier the whole conversation is re-billed every turn,
+#: and a long memory costs the ability to answer at all.
+COMPACT_HISTORY_MESSAGES = 10
 #: Ceiling on tool round-trips within a single operator utterance.
 MAX_TOOL_ITERATIONS = 8
 #: Spoken replies are short; this is generous headroom, not a target.
@@ -80,8 +85,16 @@ class Brain:
         self._dispatcher = dispatcher
         self._vision = vision
         self._console = console or Console()
-        self._system = system_blocks(extra_context)
-        self._tools = tools_with_cache_breakpoint()
+        # Providers that cache the prefix get the detailed prompt, because
+        # there it is paid for once and improves tool choice. Providers that
+        # re-send it every request get the compact one, because there the same
+        # detail is what burns the rate limit.
+        compact = not provider.supports_prompt_caching
+        self._system = system_blocks(extra_context, compact=compact)
+        self._tools = tools_for(provider)
+        self._max_history = (
+            COMPACT_HISTORY_MESSAGES if compact else MAX_HISTORY_MESSAGES
+        )
         self._messages: list[dict[str, Any]] = []
         self._abort = threading.Event()
         self._lock = threading.Lock()
@@ -267,7 +280,7 @@ class Brain:
         that produced it, so after dropping old messages the window is repaired
         until it starts on a user turn that contains no tool results.
         """
-        while len(self._messages) > MAX_HISTORY_MESSAGES:
+        while len(self._messages) > self._max_history:
             self._messages.pop(0)
         while self._messages and not _is_clean_start(self._messages[0]):
             self._messages.pop(0)

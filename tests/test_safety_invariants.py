@@ -170,3 +170,52 @@ def test_every_velocity_command_carries_an_expiry():
     expiry_uses = client.count("end_time_secs")
     assert velocity_calls > 0
     assert expiry_uses >= velocity_calls, "a velocity command is missing end_time_secs"
+
+
+# ----------------------------------------------------------------------
+# The lease keep-alive callback
+#
+# Learned the hard way on the robot: this callback runs *inside* the keep-alive
+# thread. A wrong signature raised TypeError there, killed the thread, and the
+# lease was never retained again -- turning a two-second blip into a dead
+# session where every command answered "I lost my control lease".
+
+
+def test_the_lease_failure_callback_matches_what_the_sdk_passes():
+    import inspect
+
+    pytest.importorskip("bosdyn.client", reason="Spot SDK not installed")
+    from spot_voice.robot.spot_client import SpotClient
+
+    signature = inspect.signature(SpotClient._on_lease_lost)
+    # self + the exception the SDK passes as retain_lease_failed_cb(exc)
+    assert len(signature.parameters) == 2, signature
+
+
+def test_the_lease_failure_callback_never_raises():
+    pytest.importorskip("bosdyn.client", reason="Spot SDK not installed")
+    from spot_voice.robot.spot_client import SpotClient
+
+    client = SpotClient(ip="192.0.2.1")
+
+    # A notifier that explodes must not propagate into the keep-alive thread.
+    def explode(_message):
+        raise RuntimeError("speaker on fire")
+
+    client._on_lease_conflict = explode
+    client._on_lease_lost(RuntimeError("LeaseUseError"))  # must not raise
+    assert client.lease_lost is True
+
+
+def test_repeated_lease_failures_notify_once():
+    pytest.importorskip("bosdyn.client", reason="Spot SDK not installed")
+    from spot_voice.robot.spot_client import SpotClient
+
+    client = SpotClient(ip="192.0.2.1")
+    said: list[str] = []
+    client._on_lease_conflict = said.append
+
+    for _ in range(5):  # the keep-alive retries every 2 seconds
+        client._on_lease_lost(RuntimeError("LeaseUseError"))
+
+    assert len(said) == 1

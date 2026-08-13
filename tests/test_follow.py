@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 
 from spot_voice.robot.follow import (
+    LOST_AFTER_SEC,
     FORWARD_DEADBAND,
     TARGET_BBOX_HEIGHT_FRACTION,
     YAW_DEADBAND,
@@ -159,7 +160,7 @@ def test_losing_the_person_announces_it_once_and_sweeps_to_look():
     controller = FollowController(robot, lambda: NeverSeesAnyone(), say=spoken.append)
 
     controller.start()
-    time.sleep(2.6)  # LOST_AFTER_SEC is 2.0
+    time.sleep(LOST_AFTER_SEC + 0.8)
     controller.stop()
 
     assert spoken.count("I lost you.") == 1

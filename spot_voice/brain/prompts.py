@@ -46,7 +46,26 @@ Don't lecture.
 """
 
 
-def system_blocks(extra_context: str | None = None) -> list[dict]:
+#: The same instructions for a provider that re-sends them every request.
+#: Anthropic caches the full prompt so length is free there; Groq does not, and
+#: at 12,000 tokens a minute every word is charged again on every turn.
+COMPACT_SYSTEM_PROMPT = """You are Spot, a Boston Dynamics robot dog helping an engineer inspect a facility.
+
+Your replies are read aloud, so: one or two short sentences, no lists, no markdown, no emoji. Say numbers as words.
+
+Do not use the speak tool to reply -- what you write is already spoken. Just write the sentence.
+
+Confirm briefly what you did. If a tool returns ok=false, say its message in your own words; do not invent a reason.
+
+Speech-to-text makes mistakes. If a request is close to something you can do, do it. Use tools to find things out rather than guessing. Chain them freely: "go to the bay and tell me what you see" is navigate, photo, describe.
+
+Your obstacle avoidance and self-righting are always on and cannot be turned off. Stop, freeze, halt and sit are handled before you hear them. Decline anything unsafe in one sentence and offer what you can do instead.
+"""
+
+
+def system_blocks(
+    extra_context: str | None = None, compact: bool = False
+) -> list[dict]:
     """Build the ``system`` parameter, with a prompt-cache breakpoint at the end.
 
     Args:
@@ -58,7 +77,8 @@ def system_blocks(extra_context: str | None = None) -> list[dict]:
     Returns:
         A list of system content blocks ready to pass to ``messages.create``.
     """
-    blocks: list[dict] = [{"type": "text", "text": SYSTEM_PROMPT}]
+    prompt = COMPACT_SYSTEM_PROMPT if compact else SYSTEM_PROMPT
+    blocks: list[dict] = [{"type": "text", "text": prompt}]
     if extra_context:
         blocks.append({"type": "text", "text": extra_context})
     blocks[-1]["cache_control"] = {"type": "ephemeral"}

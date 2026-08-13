@@ -47,7 +47,14 @@ FORWARD_DEADBAND = 0.10
 TOO_CLOSE_ERROR = -0.15
 
 #: Declare the target lost after this many seconds with no detection.
-LOST_AFTER_SEC = 2.0
+#:
+#: Raised from 2.0 after watching it on the robot. Two seconds sounds generous
+#: and is not: a person turning a corner, glancing back, or briefly passing
+#: behind someone else vanishes for about that long. Every drop then triggers a
+#: fresh acquisition, and a fresh acquisition takes *whoever is in front* --
+#: which is how it ended up following the wrong person. Holding the lock through
+#: short gaps is what keeps it on the right one.
+LOST_AFTER_SEC = 4.0
 
 #: Detection confidence floor for the YOLO detector.
 MIN_CONFIDENCE = 0.4
