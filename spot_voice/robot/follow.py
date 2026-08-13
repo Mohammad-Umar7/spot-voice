@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from dataclasses import dataclass
 from typing import Callable, Protocol, Sequence
 
 from ..vision.identity import IdentityTracker, LockState
@@ -86,6 +87,16 @@ SEARCH_TIMEOUT_SEC = 20.0
 #: the occasions the operator glances back, and recognition costs ~100 ms, so
 #: this is an opportunistic top-up rather than part of the tracking loop.
 FACE_CHECK_PERIOD_SEC = 1.5
+
+#: How often to log a line of control telemetry. Once a second, not once a tick:
+#: at 8 Hz the per-tick version is unreadable and slows the loop it measures.
+#:
+#: This line exists because two numbers in this module cannot be settled at a
+#: desk. ``TARGET_BBOX_HEIGHT_FRACTION`` is a guess at how tall a person looks
+#: at 1.5 m through this particular camera, and the loop rate is a target that
+#: the camera fetch and YOLO inference have to actually fit inside. Both are
+#: measurable in a single run, and neither is guessable from here.
+TELEMETRY_PERIOD_SEC = 1.0
 
 
 class PersonDetector(Protocol):
@@ -227,6 +238,35 @@ def pick_target(
     return best
 
 
+def tracking_errors(
+    box: tuple[int, int, int, int, float],
+    frame_size: tuple[int, int],
+    target_fraction: float = TARGET_BBOX_HEIGHT_FRACTION,
+) -> tuple[float, float, float]:
+    """The two normalised errors the controller acts on, plus the raw size.
+
+    Split out from :func:`compute_velocity` so the telemetry line can report the
+    same numbers the controller used, rather than a second copy of the formula
+    that could quietly drift from it.
+
+    Returns:
+        ``(error_x, box_fraction, error_size)`` where ``error_x`` is -1 at the
+        left edge and +1 at the right, ``box_fraction`` is the person's apparent
+        height as a fraction of the frame, and ``error_size`` is how far that is
+        from the target (positive means too far away).
+    """
+    width, height = frame_size
+    width = width or 1
+    height = height or 1
+    x1, y1, x2, y2, _conf = box
+
+    box_centre = (x1 + x2) / 2.0
+    error_x = (box_centre - width / 2.0) / (width / 2.0)
+    box_fraction = max(0.0, (y2 - y1)) / height
+    error_size = (target_fraction - box_fraction) / target_fraction
+    return error_x, box_fraction, error_size
+
+
 def compute_velocity(
     box: tuple[int, int, int, int, float],
     frame_size: tuple[int, int],
@@ -242,20 +282,15 @@ def compute_velocity(
     Returns:
         A :class:`~spot_voice.robot.limits.Velocity` within the hard caps.
     """
-    width, height = frame_size
-    width = width or 1
-    height = height or 1
-    x1, y1, x2, y2, _conf = box
+    error_x, _box_fraction, error_size = tracking_errors(
+        box, frame_size, target_fraction
+    )
 
-    box_centre = (x1 + x2) / 2.0
-    error_x = (box_centre - width / 2.0) / (width / 2.0)  # -1 (left) .. +1 (right)
     v_rot = 0.0
     if abs(error_x) > YAW_DEADBAND:
         # Person to the right of centre => negative yaw (clockwise) to face them.
         v_rot = max(-MAX_VROT, min(MAX_VROT, -KP_YAW * error_x))
 
-    box_fraction = max(0.0, (y2 - y1)) / height
-    error_size = (target_fraction - box_fraction) / target_fraction
     v_x = 0.0
     if error_size > FORWARD_DEADBAND:
         v_x = max(0.0, min(MAX_VX, KP_FORWARD * error_size))
@@ -264,6 +299,79 @@ def compute_velocity(
         v_x = 0.0
 
     return clamp_velocity(v_x, 0.0, v_rot)
+
+
+@dataclass
+class _Telemetry:
+    """Accumulates a second of control data and logs one line.
+
+    This exists because two numbers in this module cannot be settled without the
+    robot. ``TARGET_BBOX_HEIGHT_FRACTION`` is a guess at how tall a person looks
+    at 1.5 m through this camera, and ``LOOP_HZ`` is a target that the camera
+    fetch and YOLO inference have to actually fit inside. Guessing at them from
+    a desk produces a controller that either hunts or lags, with no way to tell
+    which. One run with this line in the log settles both.
+
+    Deliberately dumb -- sums and a max -- because it runs inside the control
+    loop and must not become the reason the loop misses its deadline.
+    """
+
+    started: float
+    last_log: float = 0.0
+    ticks: int = 0
+    worst_cycle: float = 0.0
+    frac_sum: float = 0.0
+    frac_count: int = 0
+    error_x: float = 0.0
+    v_x: float = 0.0
+    v_rot: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.last_log = self.started
+
+    def record(self, error_x, box_fraction, _error_size, velocity) -> None:
+        """Note the controller's inputs and its output for this tick."""
+        self.error_x = error_x
+        self.frac_sum += box_fraction
+        self.frac_count += 1
+        self.v_x, _v_y, self.v_rot = velocity.as_tuple()
+
+    def tick(self, elapsed: float) -> None:
+        """Note that a cycle completed, and how long it took."""
+        self.ticks += 1
+        self.worst_cycle = max(self.worst_cycle, elapsed)
+
+    def maybe_log(self, now: float) -> None:
+        """Emit the line and reset, once the window has elapsed."""
+        window = now - self.last_log
+        if window < TELEMETRY_PERIOD_SEC:
+            return
+        rate = self.ticks / window if window > 0 else 0.0
+        if self.frac_count:
+            LOGGER.info(
+                "follow %.1f Hz of %.0f (worst cycle %.0f ms) "
+                "bbox_frac=%.2f target=%.2f error_x=%+.2f v_x=%.2f v_rot=%+.2f",
+                rate,
+                LOOP_HZ,
+                self.worst_cycle * 1000.0,
+                self.frac_sum / self.frac_count,
+                TARGET_BBOX_HEIGHT_FRACTION,
+                self.error_x,
+                self.v_x,
+                self.v_rot,
+            )
+        else:
+            LOGGER.info(
+                "follow %.1f Hz of %.0f (worst cycle %.0f ms) -- no target this second",
+                rate,
+                LOOP_HZ,
+                self.worst_cycle * 1000.0,
+            )
+        self.last_log = now
+        self.ticks = 0
+        self.worst_cycle = 0.0
+        self.frac_sum = 0.0
+        self.frac_count = 0
 
 
 class FollowController:
@@ -402,6 +510,7 @@ class FollowController:
         # When set, the moment the current sweep began. None while tracking.
         searching_since: float | None = None
         self._gave_up_searching = False
+        telemetry = _Telemetry(started=time.monotonic())
         LOGGER.info(
             "Follow-me started (operator=%s, faces=%s)",
             tracker.operator or "whoever is in front",
@@ -456,6 +565,9 @@ class FollowController:
                     last_seen = now
                     announced_lost = False
                     velocity = compute_velocity(target, detector.frame_size)
+                    telemetry.record(
+                        *tracking_errors(target, detector.frame_size), velocity
+                    )
                     self._robot.drive(*velocity.as_tuple())
             except Exception:
                 LOGGER.warning("Follow-me iteration failed", exc_info=True)
@@ -467,6 +579,8 @@ class FollowController:
                 self._stop_event.wait(0.5)
 
             elapsed = time.monotonic() - cycle_start
+            telemetry.tick(elapsed)
+            telemetry.maybe_log(time.monotonic())
             self._stop_event.wait(max(0.0, period - elapsed))
 
         try:

@@ -328,3 +328,73 @@ def test_controller_reacquires_after_announcing_lost():
 
     assert spoken == ["I lost you."]
     assert driving_after_reacquire
+
+
+# ----------------------------------------------------------------------
+# Control telemetry
+#
+# TARGET_BBOX_HEIGHT_FRACTION and the achieved loop rate cannot be settled
+# without the robot, and a P-controller tuned against guesses either hunts or
+# lags with no way to tell which from the outside. These tests pin the log line
+# that turns both into measurements.
+
+
+def test_the_telemetry_line_reports_the_two_numbers_that_need_calibrating(caplog):
+    import logging
+
+    from spot_voice.robot.follow import TELEMETRY_PERIOD_SEC, _Telemetry, tracking_errors
+
+    telemetry = _Telemetry(started=0.0)
+    box = _box_at(FRAME[0] / 2, 0.40)  # a person standing too far away
+    telemetry.record(*tracking_errors(box, FRAME), compute_velocity(box, FRAME))
+    telemetry.tick(0.05)
+
+    with caplog.at_level(logging.INFO, logger="spot_voice.robot.follow"):
+        telemetry.maybe_log(TELEMETRY_PERIOD_SEC)
+
+    line = caplog.text
+    assert "bbox_frac=0.40" in line  # what to set the target to
+    assert "Hz" in line  # whether the loop keeps up
+    assert "worst cycle 50 ms" in line
+
+
+def test_telemetry_stays_quiet_until_the_window_has_passed(caplog):
+    import logging
+
+    from spot_voice.robot.follow import TELEMETRY_PERIOD_SEC, _Telemetry
+
+    telemetry = _Telemetry(started=0.0)
+    telemetry.tick(0.05)
+
+    with caplog.at_level(logging.INFO, logger="spot_voice.robot.follow"):
+        telemetry.maybe_log(TELEMETRY_PERIOD_SEC * 0.5)
+
+    assert caplog.text == ""
+
+
+def test_telemetry_says_so_rather_than_dividing_by_zero_with_no_target(caplog):
+    import logging
+
+    from spot_voice.robot.follow import TELEMETRY_PERIOD_SEC, _Telemetry
+
+    telemetry = _Telemetry(started=0.0)
+    telemetry.tick(0.05)  # loop ran, but nobody was detected
+
+    with caplog.at_level(logging.INFO, logger="spot_voice.robot.follow"):
+        telemetry.maybe_log(TELEMETRY_PERIOD_SEC)
+
+    assert "no target this second" in caplog.text
+
+
+def test_the_errors_the_telemetry_reports_are_the_ones_the_controller_used():
+    """A second copy of the formula would drift; there must be only one."""
+    from spot_voice.robot.follow import KP_YAW, tracking_errors
+
+    box = _box_at(FRAME[0] * 0.75, 0.40)  # well right of centre
+    error_x, box_fraction, _error_size = tracking_errors(box, FRAME)
+    velocity = compute_velocity(box, FRAME)
+
+    assert abs(box_fraction - 0.40) < 0.01
+    assert error_x > YAW_DEADBAND
+    # The logged error is exactly what produced the logged command.
+    assert abs(velocity.v_rot - (-KP_YAW * error_x)) < 1e-6
