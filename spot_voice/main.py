@@ -20,7 +20,7 @@ import signal
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 from rich.console import Console
 from rich.logging import RichHandler
@@ -44,7 +44,11 @@ CONSOLE = Console()
 # ----------------------------------------------------------------------
 
 
-def build_robot(config: Config, console: Console) -> RobotInterface:
+def build_robot(
+    config: Config,
+    console: Console,
+    on_lease_conflict: Callable[[str], None] | None = None,
+) -> RobotInterface:
     """Construct the mock or the real robot layer, per ``MOCK_ROBOT``."""
     if config.mock_robot:
         from .robot.mock import MockSpot
@@ -61,6 +65,7 @@ def build_robot(config: Config, console: Console) -> RobotInterface:
         ip=config.spot_ip,
         graph_path=config.graph_path,
         dock_id=config.dock_id,
+        on_lease_conflict=on_lease_conflict,
     )
 
 
@@ -71,7 +76,7 @@ class VoiceApp:
         self.config = config
         self.console = console or CONSOLE
 
-        self.robot = build_robot(config, self.console)
+        self.robot = build_robot(config, self.console, self._on_lease_conflict)
         self.follow = FollowController(
             self.robot,
             detector_factory=make_detector_factory(config.mock_robot),
@@ -150,6 +155,19 @@ class VoiceApp:
         except Exception as exc:
             LOGGER.warning("Face recogniser unavailable: %s", exc)
             return None, None
+
+    def _on_lease_conflict(self, message: str) -> None:
+        """Say, loudly and out loud, that something else took control.
+
+        Without this the failure is invisible: commands still return success
+        while the robot ignores them, so it looks like the software is broken
+        rather than out-ranked.
+        """
+        self.console.print(f"\n[bold red]LEASE LOST[/bold red] {message}\n")
+        try:
+            self.speaker.speak("I've lost control of Spot. Something else has taken the lease.")
+        except Exception:
+            LOGGER.debug("could not announce lease loss", exc_info=True)
 
     def _on_speech_start(self) -> None:
         if self.listener is not None and self.config.mute_while_speaking:

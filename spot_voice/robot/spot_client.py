@@ -71,12 +71,14 @@ class SpotClient(RobotInterface):
         dock_id: int | None = None,
         on_connection_lost: Callable[[str], None] | None = None,
         on_reconnected: Callable[[], None] | None = None,
+        on_lease_conflict: Callable[[str], None] | None = None,
     ) -> None:
         self._ip = ip
         self._graph_path = graph_path
         self._dock_id = dock_id
         self._on_connection_lost = on_connection_lost
         self._on_reconnected = on_reconnected
+        self._on_lease_conflict = on_lease_conflict
 
         self._robot: Any = None
         self._lease_client: Any = None
@@ -97,6 +99,10 @@ class SpotClient(RobotInterface):
         # what stops the reconnect loop.
         self._abort = threading.Event()
         self._closing = threading.Event()
+        # Set when the lease keep-alive starts failing. Commands are still
+        # accepted by the SDK at that point but silently ignored by the robot,
+        # so this has to be surfaced rather than inferred from stillness.
+        self._lease_lost = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -143,7 +149,10 @@ class SpotClient(RobotInterface):
             try:
                 self._lease_client.take()
                 self._lease_keepalive = LeaseKeepAlive(
-                    self._lease_client, must_acquire=True, return_at_exit=True
+                    self._lease_client,
+                    must_acquire=True,
+                    return_at_exit=True,
+                    on_failure_callback=self._on_lease_lost,
                 )
             except ResourceAlreadyClaimedError as exc:
                 raise RobotBusy("Spot is claimed by another controller.") from exc
@@ -163,8 +172,37 @@ class SpotClient(RobotInterface):
                     LOGGER.warning("GraphNav unavailable on this robot", exc_info=True)
                     self._graphnav = None
 
+            self._lease_lost = False
             self._connected = True
             LOGGER.info("Connected to Spot at %s", self._ip)
+
+    def _on_lease_lost(self) -> None:
+        """Called by the keep-alive when retaining the lease fails.
+
+        A ``LeaseUseError`` on retain means something else took control -- almost
+        always the tablet, which grabs the lease whenever it is showing a drive
+        or dock screen. The robot then ignores our commands while still
+        accepting them, so a `stand` reports success and nothing moves. That is
+        far too confusing to leave as a warning buried in the log.
+        """
+        with self._lock:
+            first = not self._lease_lost
+            self._lease_lost = True
+        if not first:
+            return  # the keep-alive retries every 2s; say it once
+
+        LOGGER.error("Lost the lease -- another controller has taken it")
+        if self._on_lease_conflict is not None:
+            self._on_lease_conflict(
+                "Something else has taken control of Spot. If the tablet is on a "
+                "drive or dock screen, back out of it -- it holds the lease and "
+                "my commands will be ignored."
+            )
+
+    @property
+    def lease_lost(self) -> bool:
+        """True once the keep-alive has failed to retain the lease."""
+        return self._lease_lost
 
     def shutdown(self) -> None:
         """Put the robot down safely, then release everything.

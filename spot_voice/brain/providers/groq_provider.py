@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from .base import (
@@ -50,7 +51,12 @@ class GroqProvider(LLMProvider):
         import groq
 
         self._groq = groq
-        self._client = groq.Groq(api_key=api_key, timeout=REQUEST_TIMEOUT_SEC, max_retries=2)
+        # max_retries=0: the failure this provider actually hits is
+        # `tool_use_failed`, a deterministic 400 from the model emitting
+        # malformed function-call syntax. Retrying it changes nothing and cost
+        # 44 seconds of dead air on the robot. Handled explicitly in complete()
+        # instead; genuine rate limits surface as a spoken message.
+        self._client = groq.Groq(api_key=api_key, timeout=REQUEST_TIMEOUT_SEC, max_retries=0)
         self._model = model
 
     # ------------------------------------------------------------------
@@ -62,13 +68,21 @@ class GroqProvider(LLMProvider):
         messages: list[dict[str, Any]],
         max_tokens: int,
     ) -> ProviderResponse:
-        response = self._client.chat.completions.create(
-            model=self._model,
-            max_tokens=max_tokens,
-            messages=to_openai_messages(system, messages),
-            tools=to_openai_tools(tools),
-            tool_choice="auto",
-        )
+        try:
+            response = self._client.chat.completions.create(
+                model=self._model,
+                max_tokens=max_tokens,
+                messages=to_openai_messages(system, messages),
+                tools=to_openai_tools(tools),
+                tool_choice="auto",
+            )
+        except Exception as exc:
+            salvaged = salvage_failed_tool_call(exc)
+            if salvaged is None:
+                raise
+            LOGGER.warning("Groq emitted a malformed tool call; salvaged the text")
+            return salvaged
+
         return from_openai_response(response)
 
     def describe_error(self, exc: BaseException) -> str | None:
@@ -92,6 +106,45 @@ class GroqProvider(LLMProvider):
 # ----------------------------------------------------------------------
 # Translation. Kept as free functions so they are testable without a key.
 # ----------------------------------------------------------------------
+
+
+#: Groq returns this code when the model writes function-call syntax the API
+#: cannot parse. It is a property of the weaker model, not of the request.
+TOOL_USE_FAILED = "tool_use_failed"
+
+
+def salvage_failed_tool_call(exc: BaseException) -> ProviderResponse | None:
+    """Recover a usable turn from Groq's ``tool_use_failed`` 400.
+
+    The model wanted to act but wrote the call wrongly, e.g.::
+
+        <function=speak":{"text": "I'm standing and my motors are on."}</function>
+
+    The intent is right there in the payload, so rather than surface an error
+    after a retry storm, pull the text out and end the turn with it. Returns
+    ``None`` for any other failure, which then propagates normally.
+    """
+    body = getattr(exc, "body", None) or {}
+    error = body.get("error", {}) if isinstance(body, dict) else {}
+    if error.get("code") != TOOL_USE_FAILED and TOOL_USE_FAILED not in str(exc):
+        return None
+
+    generation = str(error.get("failed_generation") or "")
+    # The text the model meant to speak, if it got that far.
+    match = re.search(r'"text"\s*:\s*"((?:[^"\\]|\\.)*)"', generation)
+    text = ""
+    if match:
+        try:
+            text = json.loads(f'"{match.group(1)}"')
+        except ValueError:
+            text = match.group(1)
+
+    return ProviderResponse(
+        content=[TextBlock(text=text)] if text else [],
+        tool_calls=[],
+        stop_reason="end_turn",
+        text=text,
+    )
 
 
 def to_openai_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:

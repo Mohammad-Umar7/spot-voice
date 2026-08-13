@@ -331,3 +331,78 @@ def test_anthropic_vision_means_nothing_extra_to_build():
         vision_provider="anthropic", gemini_api_key="", gemini_model="m"
     )
     assert build_vision_provider(config) is None
+
+
+# ----------------------------------------------------------------------
+# Groq's malformed tool calls
+#
+# Seen live on the robot: llama emitted `<function=speak":{"text": "..."}` and
+# the API rejected it with a 400. The SDK then retried it three times, costing
+# 44 seconds of silence before the operator heard an error -- for a failure that
+# is deterministic and will never succeed on retry.
+
+
+class FakeToolUseFailed(Exception):
+    def __init__(self, generation: str) -> None:
+        super().__init__("400 tool_use_failed")
+        self.body = {
+            "error": {
+                "message": "Failed to call a function.",
+                "type": "invalid_request_error",
+                "code": "tool_use_failed",
+                "failed_generation": generation,
+            }
+        }
+
+
+def test_a_malformed_tool_call_salvages_the_text_the_model_meant():
+    from spot_voice.brain.providers.groq_provider import salvage_failed_tool_call
+
+    exc = FakeToolUseFailed(
+        '<function=speak":{"text": "I\'m standing and my motors are on."}</function>'
+    )
+    result = salvage_failed_tool_call(exc)
+
+    assert result is not None
+    assert result.text == "I'm standing and my motors are on."
+    assert result.stop_reason == "end_turn"
+    assert result.tool_calls == []  # the turn ends rather than looping
+
+
+def test_escaped_characters_in_the_salvaged_text_are_decoded():
+    from spot_voice.brain.providers.groq_provider import salvage_failed_tool_call
+
+    # The payload arrives JSON-escaped, exactly as the model wrote it, so the
+    # salvaged text has to be decoded rather than spoken with backslashes in it.
+    generation = r'<function=speak":{"text": "Line one.\nLine \"two\"."}'
+    assert salvage_failed_tool_call(FakeToolUseFailed(generation)).text == (
+        'Line one.\nLine "two".'
+    )
+
+
+def test_a_malformed_call_with_no_recoverable_text_still_ends_cleanly():
+    from spot_voice.brain.providers.groq_provider import salvage_failed_tool_call
+
+    result = salvage_failed_tool_call(FakeToolUseFailed("<function=stand></function>"))
+    assert result is not None
+    assert result.text == ""
+    assert result.stop_reason == "end_turn"
+
+
+def test_other_failures_are_not_swallowed():
+    from spot_voice.brain.providers.groq_provider import salvage_failed_tool_call
+
+    # A rate limit or an auth failure must still propagate and be spoken.
+    for exc in (ValueError("boom"), RuntimeError("429 rate limited")):
+        assert salvage_failed_tool_call(exc) is None
+
+
+def test_the_provider_does_not_retry_a_deterministic_400():
+    # Retrying tool_use_failed is dead air on a robot: the model will produce
+    # the same malformed output again.
+    import inspect
+
+    from spot_voice.brain.providers import groq_provider
+
+    source = inspect.getsource(groq_provider.GroqProvider.__init__)
+    assert "max_retries=0" in source

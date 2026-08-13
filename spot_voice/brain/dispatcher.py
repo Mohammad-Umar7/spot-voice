@@ -9,6 +9,7 @@ gives one choke point for logging, argument validation and the hard rule that
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -325,12 +326,21 @@ class ToolDispatcher:
             return fail("There was nothing to say.")
         if self._speak is None:
             return fail("My speaker isn't available.")
+        # Fire and forget. Synthesis plus playback is 4-6 seconds; blocking the
+        # tool loop on it meant a single "stand up" spent longer talking about
+        # itself than acting. The Speaker serialises internally, so queued
+        # utterances still play in order.
+        threading.Thread(
+            target=self._speak_off_thread, args=(text,), daemon=True
+        ).start()
+        return ActionResult(True, "Speaking now.", {"spoken": text})
+
+    def _speak_off_thread(self, text: str) -> None:
+        """Speak without holding up the tool loop. Never raises."""
         try:
-            self._speak(text)
-        except Exception as exc:
+            self._speak(text)  # type: ignore[misc]
+        except Exception:
             LOGGER.warning("speak tool failed", exc_info=True)
-            return fail(f"I couldn't play that through my speaker. {type(exc).__name__}.")
-        return ActionResult(True, "Said it out loud.", {"spoken": text})
 
     def _stop_all(self, _arguments: dict[str, Any]) -> ActionResult:
         if self._follow is not None and self._follow.active:

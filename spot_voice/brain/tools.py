@@ -236,10 +236,13 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "speak",
         "description": (
-            "Say something out loud immediately, mid-task. Use only when the "
-            "operator needs to hear something before the task finishes, such as "
-            "a progress note during a long walk. Your normal reply is already "
-            "spoken, so do not use this to repeat it."
+            "Almost never needed. Everything you write as your reply is "
+            "already spoken aloud automatically, so calling this to say "
+            "something is saying it twice and makes the robot slow and "
+            "repetitive. Do not call it to acknowledge a command, report a "
+            "result, or confirm a status -- just write that in your reply "
+            "instead. The single valid use is a progress note partway through a "
+            "long walk that has not finished yet."
         ),
         "input_schema": {
             "type": "object",
