@@ -231,6 +231,7 @@ class VoiceApp:
             transcriber = Transcriber(
                 model_size=self.config.whisper_model,
                 language=self.config.stt_language,
+                device=self.config.whisper_device,
             )
             self.listener = Listener(
                 transcriber=transcriber,

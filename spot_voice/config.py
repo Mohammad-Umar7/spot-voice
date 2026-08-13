@@ -96,6 +96,8 @@ class Config:
     # --- Audio in ----------------------------------------------------------
     mic_device_name: str
     whisper_model: str
+    #: 'auto' (GPU when present), 'cuda' or 'cpu'.
+    whisper_device: str
     stt_language: str
 
     # --- Audio out ---------------------------------------------------------
@@ -167,7 +169,7 @@ class Config:
                 ),
             ),
             ("mic", self.mic_device_name or "<system default>"),
-            ("whisper model", self.whisper_model),
+            ("whisper model", f"{self.whisper_model} ({self.whisper_device})"),
             ("tts", f"{self.tts_engine} -> {self.audio_out}"),
             ("graph", str(self.graph_path) if self.graph_path else "<none>"),
             ("dock id", str(self.dock_id) if self.dock_id is not None else "<none>"),
@@ -214,6 +216,7 @@ def load_config(env_file: str | os.PathLike[str] | None = None) -> Config:
         wake_follow_up_sec=_as_float(os.getenv("WAKE_FOLLOW_UP_SEC"), 0.0),
         mic_device_name=(os.getenv("MIC_DEVICE_NAME") or "").strip(),
         whisper_model=(os.getenv("WHISPER_MODEL") or "base").strip(),
+        whisper_device=(os.getenv("WHISPER_DEVICE") or "auto").strip().lower(),
         stt_language=(os.getenv("STT_LANGUAGE") or "en").strip(),
         tts_engine=(os.getenv("TTS_ENGINE") or "edge").strip().lower(),
         audio_out=(os.getenv("AUDIO_OUT") or "laptop").strip().lower(),

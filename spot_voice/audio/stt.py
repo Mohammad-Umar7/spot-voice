@@ -29,6 +29,41 @@ _HALLUCINATION_PATTERNS = (
 )
 
 
+def cuda_is_available() -> bool:
+    """Whether ctranslate2 can see a usable CUDA device.
+
+    Asks ctranslate2 rather than torch: it is what faster-whisper actually runs
+    on, and a machine can easily have a working torch CUDA build alongside a
+    ctranslate2 that cannot find cuDNN.
+    """
+    try:
+        import ctranslate2
+
+        return ctranslate2.get_cuda_device_count() > 0
+    except Exception:
+        LOGGER.debug("could not query CUDA", exc_info=True)
+        return False
+
+
+def resolve_device(device: str, compute_type: str = "") -> tuple[str, str]:
+    """Settle on ``(device, compute_type)`` from a possibly-vague request.
+
+    ``auto`` -- the default -- means use the GPU when there is one. That matters
+    more than it sounds: on this project's laptop, ``small`` takes 4.6 seconds
+    on the CPU and 0.19 on the GPU. At CPU speed the transcriber cannot keep up
+    with someone talking, which is what made the robot feel deaf; on the GPU the
+    same model is faster than real time with room to spare for a larger one.
+    """
+    device = (device or "auto").strip().lower()
+    if device == "auto":
+        device = "cuda" if cuda_is_available() else "cpu"
+    if not compute_type:
+        # int8 is the right trade on a CPU; on a GPU it saves nothing worth
+        # having and float16 is both faster and more accurate.
+        compute_type = "float16" if device == "cuda" else "int8"
+    return device, compute_type
+
+
 @dataclass
 class Transcript:
     """One decoded utterance."""
@@ -59,16 +94,33 @@ class Transcriber:
         self,
         model_size: str = "base",
         language: str = "en",
-        compute_type: str = "int8",
-        device: str = "cpu",
+        compute_type: str = "",
+        device: str = "auto",
     ) -> None:
         from faster_whisper import WhisperModel
 
+        device, compute_type = resolve_device(device, compute_type)
         LOGGER.info("Loading faster-whisper %r (%s, %s)...", model_size, device, compute_type)
         started = time.perf_counter()
-        self._model = WhisperModel(model_size, device=device, compute_type=compute_type)
+        try:
+            self._model = WhisperModel(model_size, device=device, compute_type=compute_type)
+        except Exception as exc:
+            if device == "cpu":
+                raise
+            # A CUDA build can be present and still fail to load -- missing
+            # cuDNN, a driver mismatch, another process holding the VRAM. None
+            # of that is worth failing to start over when the CPU path works.
+            LOGGER.warning("GPU transcription unavailable (%s); falling back to CPU", exc)
+            device, compute_type = "cpu", "int8"
+            self._model = WhisperModel(model_size, device=device, compute_type=compute_type)
+        self._device = device
         self._language = language
-        LOGGER.info("Model ready in %.1fs", time.perf_counter() - started)
+        LOGGER.info("Model ready in %.1fs on %s", time.perf_counter() - started, device)
+
+    @property
+    def device(self) -> str:
+        """Where transcription actually ended up running."""
+        return self._device
 
     def transcribe_pcm(self, pcm: bytes, sample_rate: int = 16000) -> Transcript:
         """Decode 16-bit PCM audio into text."""

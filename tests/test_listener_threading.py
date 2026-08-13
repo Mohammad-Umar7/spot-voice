@@ -104,3 +104,56 @@ def test_transcripts_still_reach_the_handler():
     worker.join(timeout=1.0)
 
     assert delivered == ["stand up"]
+
+
+# ----------------------------------------------------------------------
+# Device selection
+#
+# On this project's laptop `small` takes 4.58s on the CPU and 0.19s on the GPU.
+# At CPU speed the transcriber cannot keep up with someone talking, which is
+# what made the robot feel deaf -- so using an available GPU is not a tuning
+# preference, it is the difference between working and not.
+
+
+def test_auto_prefers_the_gpu_when_one_is_visible(monkeypatch):
+    import spot_voice.audio.stt as stt
+
+    monkeypatch.setattr(stt, "cuda_is_available", lambda: True)
+    assert stt.resolve_device("auto") == ("cuda", "float16")
+
+
+def test_auto_falls_back_to_cpu_with_no_gpu(monkeypatch):
+    import spot_voice.audio.stt as stt
+
+    monkeypatch.setattr(stt, "cuda_is_available", lambda: False)
+    assert stt.resolve_device("auto") == ("cpu", "int8")
+
+
+def test_an_explicit_device_is_honoured(monkeypatch):
+    import spot_voice.audio.stt as stt
+
+    monkeypatch.setattr(stt, "cuda_is_available", lambda: True)
+    assert stt.resolve_device("cpu") == ("cpu", "int8")
+
+
+def test_an_explicit_compute_type_is_never_overridden():
+    from spot_voice.audio.stt import resolve_device
+
+    assert resolve_device("cuda", "int8_float16") == ("cuda", "int8_float16")
+
+
+def test_a_missing_ctranslate2_is_not_fatal(monkeypatch):
+    """Asking the GPU question must never stop the program starting."""
+    import builtins
+
+    import spot_voice.audio.stt as stt
+
+    real_import = builtins.__import__
+
+    def explode(name, *args, **kwargs):
+        if name == "ctranslate2":
+            raise ImportError("no ctranslate2")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", explode)
+    assert stt.cuda_is_available() is False
