@@ -1,0 +1,170 @@
+"""Face enrollment: teaching Spot who you are.
+
+Run once, before a demo::
+
+    python -m spot_voice --enroll umar
+
+Stand in front of the camera and it takes several samples a second apart, from
+slightly different angles. Several beats one: acquisition on the robot happens
+in whatever light the facility has, at whatever angle you happen to be standing.
+
+**Enrollment always uses Spot's own camera, and there is no fallback.** That is
+deliberate rather than fussy: recognition happens on greyscale fisheye frames
+through Spot's lens, and an embedding taken from a crisp colour webcam is a poor
+match for those. A webcam fallback would enroll you successfully and then fail to
+recognise you on the day, which is worse than refusing. So this needs a real
+robot, connected -- it is a one-time setup step, not something to rehearse at a
+desk.
+
+Privacy: what is written to disk is a numeric embedding, not a photograph. It
+stays in your local work directory and is never uploaded. Enroll only people who
+have agreed to it.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+
+from rich.console import Console
+
+from .vision.faces import FaceStore
+
+LOGGER = logging.getLogger(__name__)
+
+#: How many samples to take. Enough for angle and lighting variation without
+#: making the operator stand still for a minute.
+SAMPLE_COUNT = 5
+#: Gap between samples, so you have time to shift position slightly.
+SAMPLE_GAP_SEC = 1.2
+
+
+def _robot_frames(robot, count: int, gap: float, console: Console):
+    """Yield frames from Spot's front camera."""
+    from .robot.follow import decode_jpeg
+
+    for index in range(count):
+        time.sleep(gap)
+        capture = robot.capture_image("front")
+        if not capture.ok or not capture.image_jpeg:
+            console.print(f"[yellow]Camera returned nothing: {capture.message}[/yellow]")
+            continue
+        frame = decode_jpeg(capture.image_jpeg)
+        if frame is None:
+            continue
+        console.print(f"  sample {index + 1}/{count}")
+        yield frame
+
+
+def enroll(
+    name: str,
+    config,
+    console: Console,
+    robot,
+    samples: int = SAMPLE_COUNT,
+    gap: float = SAMPLE_GAP_SEC,
+) -> int:
+    """Enroll ``name`` from Spot's front camera. Returns a process exit code.
+
+    Args:
+        name: The identity to record. Reuse the same name to add more samples.
+        config: Loaded :class:`~spot_voice.config.Config`.
+        console: Rich console for progress.
+        robot: A connected robot. Required -- see the module docstring for why
+            there is no webcam fallback.
+        samples: How many frames to try to capture.
+        gap: Seconds between captures.
+    """
+    name = (name or "").strip()
+    if not name:
+        console.print("[red]Give a name to enroll, e.g. --enroll umar[/red]")
+        return 2
+
+    if robot is None:
+        console.print(
+            "[red]Enrollment needs Spot's own camera.[/red]\n"
+            "Recognition runs on Spot's greyscale fisheye frames, so the sample "
+            "has to come through the same lens -- a webcam enrollment would look "
+            "fine here and then fail to recognise you on the day.\n"
+            "Set MOCK_ROBOT=false, get on the robot's wifi, and try again. "
+            "Check the path first with: python -m spot_voice --check"
+        )
+        return 2
+
+    try:
+        from .vision.faces import FaceRecogniser
+
+        recogniser = FaceRecogniser()
+    except ImportError as exc:
+        console.print(
+            f"[red]Face recognition is not installed ({exc}).[/red]\n"
+            "Run: pip install insightface onnxruntime"
+        )
+        return 1
+    except Exception as exc:
+        console.print(f"[red]Could not start the face recogniser: {exc}[/red]")
+        return 1
+
+    store = FaceStore(config.face_store_path)
+    console.print(
+        f"Enrolling [bold]{name}[/bold] from Spot's front camera.\n"
+        "Stand about a metre in front of the robot, facing it, well lit, and "
+        "move your head slightly between samples.\n"
+    )
+
+    frames = _robot_frames(robot, samples, gap, console)
+
+    captured = 0
+    for frame in frames:
+        try:
+            faces = recogniser.detect(frame)
+        except Exception as exc:
+            console.print(f"[yellow]  detection failed: {exc}[/yellow]")
+            continue
+        if not faces:
+            console.print("[yellow]  no face in that frame[/yellow]")
+            continue
+        if len(faces) > 1:
+            # Ambiguous: enrolling the wrong face would be worse than skipping.
+            console.print(
+                "[yellow]  more than one face in frame -- skipped. "
+                "Enroll with nobody else in shot.[/yellow]"
+            )
+            continue
+        _box, embedding = faces[0]
+        store.add(name, embedding)
+        captured += 1
+
+    if captured == 0:
+        console.print(
+            "\n[red]No usable samples.[/red] Spot's fisheye cameras are wide-angle "
+            "and greyscale, so faces need to be close and well lit: stand about a "
+            "metre away, face the robot square on, and make sure nobody else is in "
+            "shot."
+        )
+        return 1
+
+    store.save()
+    console.print(
+        f"\n[green]Enrolled {name} with {captured} sample(s).[/green]\n"
+        f"Stored as embeddings in {store.path} -- no photographs, nothing uploaded."
+    )
+    console.print(f"Known faces: {', '.join(store.names)}")
+    console.print(
+        f"\nSet [bold]OPERATOR_NAME={name}[/bold] in .env so follow-me looks for you."
+    )
+    return 0
+
+
+def forget(name: str, config, console: Console) -> int:
+    """Remove an enrolled identity. Returns a process exit code."""
+    store = FaceStore(config.face_store_path)
+    if store.forget(name.strip()):
+        store.save()
+        console.print(f"[green]Removed {name}.[/green]")
+        return 0
+    console.print(
+        f"[yellow]{name} is not enrolled.[/yellow] Known: "
+        + (", ".join(store.names) or "nobody")
+    )
+    return 1

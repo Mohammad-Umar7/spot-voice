@@ -153,7 +153,7 @@ def test_controller_drives_while_following_and_zeroes_on_stop():
     assert robot.commands[-1] == (0.0, 0.0, 0.0)
 
 
-def test_losing_the_person_announces_it_once_and_holds_still():
+def test_losing_the_person_announces_it_once_and_sweeps_to_look():
     robot = RecordingRobot()
     spoken: list[str] = []
     controller = FollowController(robot, lambda: NeverSeesAnyone(), say=spoken.append)
@@ -163,7 +163,58 @@ def test_losing_the_person_announces_it_once_and_holds_still():
     controller.stop()
 
     assert spoken.count("I lost you.") == 1
-    assert all(command == (0.0, 0.0, 0.0) for command in robot.commands)
+    # It looks for you rather than giving up where it stands.
+    assert any(command[2] != 0.0 for command in robot.commands)
+
+
+def test_the_sweep_only_ever_turns_on_the_spot():
+    # A robot that has lost its operator must not wander off looking. Rotation
+    # is safe -- it stays where you left it; translation is not.
+    robot = RecordingRobot()
+    controller = FollowController(robot, lambda: NeverSeesAnyone())
+
+    controller.start()
+    time.sleep(1.2)
+    controller.stop()
+
+    assert robot.commands, "expected some commands"
+    for v_x, v_y, _v_rot in robot.commands:
+        assert v_x == 0.0 and v_y == 0.0
+
+
+def test_the_sweep_respects_the_yaw_cap():
+    from spot_voice.robot.follow import SEARCH_YAW_RATE
+    from spot_voice.robot.limits import MAX_VROT
+
+    assert 0 < SEARCH_YAW_RATE <= MAX_VROT
+    robot = RecordingRobot()
+    controller = FollowController(robot, lambda: NeverSeesAnyone())
+    controller.start()
+    time.sleep(0.6)
+    controller.stop()
+
+    assert all(abs(command[2]) <= MAX_VROT for command in robot.commands)
+
+
+def test_the_sweep_gives_up_and_says_so_rather_than_spinning_forever():
+    import spot_voice.robot.follow as follow_module
+
+    robot = RecordingRobot()
+    spoken: list[str] = []
+    controller = FollowController(robot, lambda: NeverSeesAnyone(), say=spoken.append)
+
+    original = follow_module.SEARCH_TIMEOUT_SEC
+    follow_module.SEARCH_TIMEOUT_SEC = 0.5
+    try:
+        controller.start()
+        time.sleep(1.5)
+        controller.stop()
+    finally:
+        follow_module.SEARCH_TIMEOUT_SEC = original
+
+    assert any("can't find you" in line for line in spoken)
+    # And it stops turning once it has given up.
+    assert robot.commands[-1] == (0.0, 0.0, 0.0)
 
 
 def test_starting_twice_is_idempotent():

@@ -32,6 +32,8 @@ simpleaudio>=1.0.4         # laptop playback; winsound is used if this is absent
 
 # --- Vision (follow-me) -----------------------------------------------------
 ultralytics>=8.1.0         # YOLOv8n person detection, CPU is fine
+insightface>=0.7.3         # face recognition for "follow me"; optional -- without
+onnxruntime>=1.16          # it, follow-me locks onto whoever is in front
 opencv-python>=4.8.0
 numpy>=1.24
 

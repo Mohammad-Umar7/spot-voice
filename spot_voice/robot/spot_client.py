@@ -276,6 +276,66 @@ class SpotClient(RobotInterface):
             return fail(to_speakable(exc))
         return ok("Standing.")
 
+    def emote(self, gesture: str) -> ActionResult:
+        """Run a short body-pose sequence.
+
+        Uses ``synchro_stand_command`` with a body rotation, which is the same
+        primitive the SDK's own hello_spot example uses. Angles are clamped in
+        :mod:`spot_voice.robot.emotes`; nothing the model asks for can tip the
+        robot past a safe pose, and the sequence always ends standing straight.
+        """
+        from bosdyn.client.robot_command import RobotCommandBuilder, blocking_stand
+        from bosdyn.geometry import EulerZXY
+
+        from .emotes import available, sequence
+
+        plan = sequence(gesture)
+        if plan is None:
+            return fail(
+                f"I don't know a gesture called {gesture}. I can do: "
+                + ", ".join(available())
+                + "."
+            )
+        summary, poses = plan
+
+        if self.is_docked():
+            return fail("I'm on the dock. Ask me to undock first.")
+
+        try:
+            self._call("power on", self._power_on_if_needed)
+            # Gestures are stand-only. Standing first also guarantees a known
+            # starting pose, so a nod looks like a nod rather than a lurch.
+            self._call(
+                "stand", lambda: blocking_stand(self._command_client, timeout_sec=10)
+            )
+        except Exception as exc:
+            return fail(to_speakable(exc))
+
+        self._abort.clear()
+        try:
+            for pose in poses:
+                if self._abort.is_set():
+                    break
+                orientation = EulerZXY(yaw=pose.yaw, roll=pose.roll, pitch=pose.pitch)
+                command = RobotCommandBuilder.synchro_stand_command(
+                    footprint_R_body=orientation, body_height=pose.height
+                )
+                self._call("pose", lambda c=command: self._command_client.robot_command(c))
+                time.sleep(pose.hold)
+        except Exception as exc:
+            # Whatever happened, try to leave the robot standing straight.
+            try:
+                self._command_client.robot_command(
+                    RobotCommandBuilder.synchro_stand_command()
+                )
+            except Exception:
+                LOGGER.debug("could not restore neutral pose", exc_info=True)
+            return fail(to_speakable(exc))
+
+        if self._abort.is_set():
+            return ok("Stopped.")
+        return ok(summary)
+
     def sit(self) -> ActionResult:
         from bosdyn.client.robot_command import RobotCommandBuilder
 

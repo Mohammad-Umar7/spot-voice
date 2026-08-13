@@ -29,6 +29,7 @@ EXPECTED_TOOLS = {
     "dock",
     "undock",
     "speak",
+    "emote",
     "stop_all",
 }
 

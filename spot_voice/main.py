@@ -76,6 +76,8 @@ class VoiceApp:
             self.robot,
             detector_factory=make_detector_factory(config.mock_robot),
             say=lambda text: self.speaker.speak(text),
+            tracker_factory=self._build_tracker,
+            face_factory=self._build_face_pipeline,
         )
         self.speaker = Speaker(
             engine=config.tts_engine,
@@ -106,6 +108,34 @@ class VoiceApp:
         self._shutdown = threading.Event()
 
     # ------------------------------------------------------------------
+
+    def _build_tracker(self):
+        """The identity tracker follow-me uses to stay locked on one person."""
+        from .vision.identity import IdentityTracker
+
+        return IdentityTracker(operator=self.config.operator_name or None)
+
+    def _build_face_pipeline(self):
+        """Return ``(recogniser, store)``, or ``(None, None)``.
+
+        Called on the follow thread, because loading a face model takes seconds.
+        Missing model or empty enrollment is not an error: follow-me falls back
+        to locking onto whoever is in front of the robot.
+        """
+        if not self.config.face_recognition:
+            return None, None
+
+        from .vision.faces import FaceRecogniser, FaceStore
+
+        store = FaceStore(self.config.face_store_path)
+        if store.is_empty:
+            LOGGER.info("No faces enrolled; follow-me will use position only")
+            return None, None
+        try:
+            return FaceRecogniser(), store
+        except Exception as exc:
+            LOGGER.warning("Face recogniser unavailable: %s", exc)
+            return None, None
 
     def _on_speech_start(self) -> None:
         if self.listener is not None and self.config.mute_while_speaking:
@@ -371,6 +401,7 @@ MANUAL_HELP = """\
   waypoints             list the places on the map
   undock | dock         leave or return to the charger
   follow | unfollow     follow-me
+  emote <gesture>       greet | bow | nod | shake | wiggle | look_around
   say <text>            speak through the speaker
   help                  this list
   quit                  exit\
@@ -397,6 +428,9 @@ def parse_manual_command(line: str) -> tuple[str, dict[str, Any]] | None:
 
     if head == "say":
         return "speak", {"text": " ".join(rest)}
+
+    if head in {"emote", "gesture", "do"}:
+        return ("emote", {"gesture": rest[0]}) if rest else None
 
     if head in {"go", "goto", "navigate"}:
         return "navigate_to", {"waypoint_name": " ".join(rest)}
@@ -516,6 +550,34 @@ def print_preflight(config: Config, console: Console) -> int:
             console.print(f"[yellow]{result.name}:[/yellow] {result.fix}")
     console.print(f"\n[bold red]{len(failures)} check(s) failed.[/bold red]")
     return 1
+
+
+def run_enrollment(config: Config, name: str, console: Console) -> int:
+    """Enroll a face from Spot's own camera.
+
+    Requires a real robot. There is deliberately no webcam fallback: the
+    embedding has to come through the same lens that will do the recognising,
+    or it will match here and fail on the day.
+    """
+    from .enroll import enroll
+
+    if config.mock_robot:
+        return enroll(name, config, console, robot=None)  # prints why, exits 2
+
+    robot = build_robot(config, console)
+    try:
+        robot.connect()
+    except Exception as exc:
+        console.print(
+            f"[red]Could not reach the robot:[/red] {exc}\n"
+            "Enrollment needs Spot's camera. Check the path with: "
+            "python -m spot_voice --check"
+        )
+        return 1
+    try:
+        return enroll(name, config, console, robot=robot)
+    finally:
+        robot.shutdown()
 
 
 def print_find_robot(config: Config, console: Console) -> int:
@@ -646,6 +708,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--say", metavar="TEXT", help="handle one command and exit (useful for testing)"
     )
     parser.add_argument(
+        "--enroll",
+        metavar="NAME",
+        help="record your face so follow-me looks for you specifically, then exit",
+    )
+    parser.add_argument(
+        "--forget", metavar="NAME", help="remove an enrolled face and exit"
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
         help="pre-flight: can this laptop reach the robot, the model API and the "
@@ -684,6 +754,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     setup_logging(config.log_level)
+
+    if args.forget:
+        from .enroll import forget
+
+        return forget(args.forget, config, CONSOLE)
+
+    if args.enroll:
+        return run_enrollment(config, args.enroll, CONSOLE)
 
     if args.find_robot:
         return print_find_robot(config, CONSOLE)

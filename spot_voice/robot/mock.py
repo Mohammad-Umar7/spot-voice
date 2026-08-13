@@ -143,6 +143,37 @@ class MockSpot(RobotInterface):
         time.sleep(0.4)
         return ok("Standing.")
 
+    def emote(self, gesture: str) -> ActionResult:
+        from .emotes import available, sequence
+
+        plan = sequence(gesture)
+        if plan is None:
+            return fail(
+                f"I don't know a gesture called {gesture}. I can do: "
+                + ", ".join(available())
+                + "."
+            )
+        summary, poses = plan
+        if self._docked:
+            return fail("I'm on the dock. Ask me to undock first.")
+
+        with self._lock:
+            if not self._standing:
+                self._log("not standing yet -> standing first")
+                self._standing = True
+                self._powered = True
+            self._log(f"gesture {gesture!r}: {len(poses)} body poses")
+
+        for pose in poses:
+            self._log(
+                f"  synchro_stand_command(yaw={pose.yaw:.2f} roll={pose.roll:.2f} "
+                f"pitch={pose.pitch:.2f} h={pose.height:+.2f}) hold {pose.hold:.2f}s",
+                throttle_key=None,
+            )
+            time.sleep(min(pose.hold, 0.15))  # simulated, not real-time
+        self._drain_battery(0.02)
+        return ok(summary)
+
     def sit(self) -> ActionResult:
         with self._lock:
             self._standing = False

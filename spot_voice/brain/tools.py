@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..robot.emotes import available as available_gestures
 from ..robot.limits import (
     MAX_MOVE_DEGREES,
     MAX_MOVE_DISTANCE_M,
@@ -25,6 +26,9 @@ MOVE_DIRECTIONS = ["forward", "back", "left", "right", "turn_left", "turn_right"
 
 #: Cameras accepted by the ``capture_image`` tool.
 CAMERAS = ["front", "left", "right"]
+
+#: Body-language gestures the ``emote`` tool can perform.
+GESTURES = available_gestures()
 
 
 TOOLS: list[dict[str, Any]] = [
@@ -127,15 +131,16 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "start_follow",
         "description": (
-            "Start follow-me. Spot locks onto whoever is standing nearest and "
-            "most centred in its front camera at that moment, then follows that "
-            "same person at roughly 1.5 m -- it will not switch to someone who "
-            "walks past. There is no face recognition, so when starting it is "
-            "worth telling the operator to stand in front of you. Spot's own "
-            "obstacle avoidance remains active. Stops on stop_follow, the spoken "
-            "word 'stop', or after the person is out of sight for two seconds "
-            "('I lost you'), after which it re-locks on whoever is front and "
-            "centre."
+            "Start follow-me. If the operator's face is enrolled, Spot turns "
+            "slowly on the spot to look for them, locks on once it recognises "
+            "them, and then follows that same person at roughly 1.5 m using how "
+            "they look from behind -- so it keeps them even when it can only see "
+            "their back, and will not switch to someone who walks past. Without "
+            "an enrolled face it locks onto whoever is standing in front of it, "
+            "so it is worth telling the operator to stand in front of you. "
+            "Spot's own obstacle avoidance remains active. Stops on stop_follow, "
+            "the spoken word 'stop', or after the person is out of sight for two "
+            "seconds ('I lost you'), after which it looks for them again."
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
@@ -190,6 +195,31 @@ TOOLS: list[dict[str, Any]] = [
             "call stand instead to get it on its feet."
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "emote",
+        "description": (
+            "Perform a short body-language gesture. Spot has no arm, so these "
+            "are body movements: a bow, a nod, a head tilt, a wiggle. Use one "
+            "when the operator asks you to greet people, acknowledge something, "
+            "agree or disagree, or when a gesture would read better than words. "
+            "'greet' is the one for saying hello to a room. Gestures only work "
+            "while standing and take a couple of seconds."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "gesture": {
+                    "type": "string",
+                    "enum": GESTURES,
+                    "description": (
+                        "Which gesture to perform. Pick the closest fit rather "
+                        "than refusing."
+                    ),
+                }
+            },
+            "required": ["gesture"],
+        },
     },
     {
         "name": "speak",

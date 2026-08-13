@@ -102,6 +102,10 @@ class RobotInterface(abc.ABC):
     def sit(self) -> ActionResult:
         """Sit down."""
 
+    @abc.abstractmethod
+    def emote(self, gesture: str) -> ActionResult:
+        """Perform a short body-language gesture while standing."""
+
     # --- motion ------------------------------------------------------------
 
     @abc.abstractmethod

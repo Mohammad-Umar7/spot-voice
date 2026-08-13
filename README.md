@@ -609,6 +609,11 @@ spot_voice/
     spot_client.py   the real SDK layer
     mock.py          the simulated robot
     follow.py        follow-me thread and P-controller
+  vision/
+    faces.py         enrollment store + InsightFace recognition
+    appearance.py    the colour signature that works from behind
+    identity.py      the three-layer lock: geometry, appearance, face
+  enroll.py          --enroll: record a face from Spot's camera
   tts/
     engines.py       edge-tts and pyttsx3, both producing 16 kHz mono WAV
     speaker.py       synthesis + routing to robot or laptop
@@ -628,7 +633,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-325 tests, no robot and no API key required. They cover:
+389 tests, no robot and no API key required. They cover:
 
 - the reflex matcher: stop words, transcription slips, and the false positives it
   must *not* fire on
@@ -638,6 +643,10 @@ python -m pytest
 - tool schemas, including a guard that no safety-override tool has been added
 - the follow-me controller's target selection and control law, including that
   a person crossing between Spot and its target cannot steal the follow
+- the identity stack: the walking-away scenario end to end, appearance matching
+  from behind, occlusion holding rather than re-targeting, and re-finding
+  someone after geometry breaks
+- gesture pose clamping, including NaN and out-of-range angles
 - the Anthropic tool-use loop end to end against a scripted fake client:
   parallel tool calls, image attachment, refusals, connection failure, abort, and
   the runaway-loop cap

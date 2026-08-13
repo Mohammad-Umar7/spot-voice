@@ -64,6 +64,12 @@ class Config:
     gemini_api_key: str
     gemini_model: str
 
+    # --- Vision ------------------------------------------------------------
+    #: Enrolled name to follow. Blank means follow whoever is in front.
+    operator_name: str
+    #: Whether to use face recognition at all.
+    face_recognition: bool
+
     # --- Audio in ----------------------------------------------------------
     mic_device_name: str
     whisper_model: str
@@ -80,6 +86,11 @@ class Config:
     work_dir: Path = field(default_factory=lambda: Path.home() / ".spot_voice")
 
     # ------------------------------------------------------------------
+    @property
+    def face_store_path(self) -> Path:
+        """Where enrolled face embeddings live. Local only, never uploaded."""
+        return self.work_dir / "faces.json"
+
     @property
     def llm_api_key(self) -> str:
         """The key for whichever provider is doing tool calling."""
@@ -119,6 +130,11 @@ class Config:
             ("tool calling", f"{self.llm_provider} ({self.llm_model})"),
             ("vision", vision),
             ("api key", redacted),
+            (
+                "follows",
+                (self.operator_name or "whoever is in front")
+                + ("" if self.face_recognition else " (face recognition off)"),
+            ),
             ("mic", self.mic_device_name or "<system default>"),
             ("whisper model", self.whisper_model),
             ("tts", f"{self.tts_engine} -> {self.audio_out}"),
@@ -151,6 +167,8 @@ def load_config(env_file: str | os.PathLike[str] | None = None) -> Config:
         dock_id=_as_int(os.getenv("DOCK_ID"), None),
         graph_path=Path(graph_raw).expanduser() if graph_raw else None,
         mock_robot=mock,
+        operator_name=(os.getenv("OPERATOR_NAME") or "").strip(),
+        face_recognition=_as_bool(os.getenv("FACE_RECOGNITION"), default=True),
         llm_provider=(os.getenv("LLM_PROVIDER") or "anthropic").strip().lower(),
         vision_provider=(os.getenv("VISION_PROVIDER") or "").strip().lower(),
         anthropic_api_key=(os.getenv("ANTHROPIC_API_KEY") or "").strip(),

@@ -83,6 +83,7 @@ class ToolDispatcher:
             "power_on": self._power_on,
             "stand": self._stand,
             "sit": self._sit,
+            "emote": self._emote,
             "move": self._move,
             "navigate_to": self._navigate_to,
             "list_waypoints": self._list_waypoints,
@@ -165,6 +166,15 @@ class ToolDispatcher:
         if self._follow is not None and self._follow.active:
             self._follow.stop()
         return self._robot.sit()
+
+    def _emote(self, arguments: dict[str, Any]) -> ActionResult:
+        gesture = _as_text(arguments.get("gesture")).lower()
+        if not gesture:
+            return fail("I need to know which gesture to do.")
+        # Gestures are stand-only, so stop walking first.
+        if self._follow is not None and self._follow.active:
+            self._follow.stop()
+        return self._robot.emote(gesture)
 
     def _move(self, arguments: dict[str, Any]) -> ActionResult:
         direction = _as_text(arguments.get("direction")).lower()

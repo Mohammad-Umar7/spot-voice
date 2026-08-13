@@ -19,6 +19,7 @@ import threading
 import time
 from typing import Callable, Protocol, Sequence
 
+from ..vision.identity import IdentityTracker, LockState
 from .base import RobotInterface
 from .limits import MAX_VROT, MAX_VX, clamp_velocity
 
@@ -65,6 +66,19 @@ STICKY_IOU = 0.10
 #: to the camera, so their box is far taller -- this is what stops the lock
 #: jumping to them even though their box overlaps the target's.
 STICKY_HEIGHT_RATIO = (0.6, 1.6)
+
+#: Yaw rate used when sweeping to look for the operator. Deliberately slow: a
+#: robot spinning quickly near people is alarming, and a slow sweep gives the
+#: face recogniser several frames per bearing rather than a smear.
+SEARCH_YAW_RATE = 0.3
+
+#: Give up sweeping after this long and say so, rather than turning forever.
+SEARCH_TIMEOUT_SEC = 20.0
+
+#: How often to run face recognition during a follow. Faces are only visible on
+#: the occasions the operator glances back, and recognition costs ~100 ms, so
+#: this is an opportunistic top-up rather than part of the tracking loop.
+FACE_CHECK_PERIOD_SEC = 1.5
 
 
 class PersonDetector(Protocol):
@@ -260,10 +274,16 @@ class FollowController:
         robot: RobotInterface,
         detector_factory: Callable[[], PersonDetector],
         say: Callable[[str], None] | None = None,
+        tracker_factory: Callable[[], "IdentityTracker"] | None = None,
+        face_factory: Callable[[], tuple] | None = None,
     ) -> None:
         self._robot = robot
         self._detector_factory = detector_factory
         self._say = say or (lambda _text: None)
+        self._tracker_factory = tracker_factory
+        # Returns (recogniser, store). Built on the worker thread because
+        # loading a face model takes seconds and must not block the voice loop.
+        self._face_factory = face_factory
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._ready = threading.Event()
@@ -319,6 +339,39 @@ class FollowController:
 
     # ------------------------------------------------------------------
 
+    def _sweep(self, elapsed: float) -> None:
+        """Turn slowly in place to look for the operator.
+
+        This is what "look for me first" means physically. It only ever rotates
+        -- never translates -- so the robot stays where you left it, and it goes
+        through the same capped velocity path as everything else. After
+        ``SEARCH_TIMEOUT_SEC`` it stops and says so rather than spinning
+        indefinitely.
+        """
+        if elapsed > SEARCH_TIMEOUT_SEC:
+            self._robot.drive(0.0, 0.0, 0.0)
+            if not self._gave_up_searching:
+                self._gave_up_searching = True
+                LOGGER.info("Gave up sweeping for the operator")
+                self._say("I can't find you. Step in front of me and say follow me again.")
+            return
+        self._robot.drive(0.0, 0.0, SEARCH_YAW_RATE)
+
+    def _build_faces(self):
+        """Construct the face recogniser and store, or ``(None, None)``.
+
+        Never fatal: without faces, follow-me still works by locking onto
+        whoever is in front of the robot, which is how it behaved before face
+        recognition existed.
+        """
+        if self._face_factory is None:
+            return None, None
+        try:
+            return self._face_factory()
+        except Exception as exc:
+            LOGGER.warning("Face recognition unavailable (%s)", exc, exc_info=True)
+            return None, None
+
     def _run(self) -> None:
         try:
             detector = self._detector_factory()
@@ -332,40 +385,69 @@ class FollowController:
             return
         self._ready.set()
 
+        tracker = self._tracker_factory() if self._tracker_factory else IdentityTracker()
+        recogniser, face_store = self._build_faces()
+
         period = 1.0 / LOOP_HZ
         last_seen = time.monotonic()
+        last_face_check = 0.0
         announced_lost = False
-        # The lock: last confirmed sighting of the person being followed. While
-        # set, pick_target only accepts detections consistent with it, so the
-        # follow target cannot silently swap to a passer-by.
-        locked_box: tuple[int, int, int, int, float] | None = None
-        LOGGER.info("Follow-me started")
+        # When set, the moment the current sweep began. None while tracking.
+        searching_since: float | None = None
+        self._gave_up_searching = False
+        LOGGER.info(
+            "Follow-me started (operator=%s, faces=%s)",
+            tracker.operator or "whoever is in front",
+            "on" if recogniser else "off",
+        )
 
         while not self._stop_event.is_set():
             cycle_start = time.monotonic()
+            now = cycle_start
             try:
-                frame = self._robot.capture_image("front")
+                capture = self._robot.capture_image("front")
                 boxes: Sequence[tuple[int, int, int, int, float]] = []
-                if frame.ok and frame.image_jpeg:
-                    boxes = detector.detect(frame.image_jpeg)
+                image = None
+                if capture.ok and capture.image_jpeg:
+                    boxes = detector.detect(capture.image_jpeg)
+                    image = decode_jpeg(capture.image_jpeg)
 
-                target = pick_target(boxes, detector.frame_size[0], previous=locked_box)
+                # Faces are expensive and only visible when the operator turns
+                # round, so this is an occasional top-up, not part of the loop.
+                faces = None
+                if recogniser is not None and now - last_face_check > FACE_CHECK_PERIOD_SEC:
+                    last_face_check = now
+                    try:
+                        faces = recogniser.detect(image)
+                    except Exception:
+                        LOGGER.debug("face detection failed this frame", exc_info=True)
+
+                target = tracker.update(image, boxes, faces=faces, face_store=face_store)
+
+                # Nothing locked, and no recognised face to introduce anyone.
+                # If we are not looking for a specific person, following whoever
+                # stands in front of the robot is the right answer.
+                if target is None and not tracker.locked and boxes:
+                    if tracker.operator is None or recogniser is None:
+                        target = tracker.acquire_fallback(
+                            image, boxes, detector.frame_size[0]
+                        )
+
                 if target is None:
-                    self._robot.drive(0.0, 0.0, 0.0)
-                    if (
-                        not announced_lost
-                        and time.monotonic() - last_seen > LOST_AFTER_SEC
-                    ):
+                    if searching_since is None:
+                        searching_since = now
+                    self._sweep(now - searching_since)
+                    if not announced_lost and now - last_seen > LOST_AFTER_SEC:
                         announced_lost = True
-                        # Release the lock: after announcing, re-acquire whoever
-                        # stands front-and-centre, exactly like a fresh start.
-                        locked_box = None
+                        tracker.release()
                         LOGGER.info("Follow-me lost the target")
                         self._say("I lost you.")
                 else:
-                    last_seen = time.monotonic()
+                    if searching_since is not None:
+                        LOGGER.info("Reacquired after sweeping")
+                    searching_since = None
+                    last_seen = now
                     announced_lost = False
-                    locked_box = target
                     velocity = compute_velocity(target, detector.frame_size)
                     self._robot.drive(*velocity.as_tuple())
             except Exception:
@@ -385,6 +467,22 @@ class FollowController:
         except Exception:  # pragma: no cover
             pass
         LOGGER.info("Follow-me stopped")
+
+
+def decode_jpeg(data: bytes):
+    """Decode JPEG bytes to a BGR image, or ``None``.
+
+    The appearance layer needs pixels, not just boxes -- it is the colours of
+    what the person is wearing that make following-from-behind work.
+    """
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:  # pragma: no cover - opencv is a hard dependency
+        return None
+    if not data:
+        return None
+    return cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
 
 
 def make_detector_factory(mock: bool) -> Callable[[], PersonDetector]:
