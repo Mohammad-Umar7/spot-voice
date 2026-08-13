@@ -111,10 +111,18 @@ def test_degenerate_frame_size_does_not_divide_by_zero():
 
 
 class RecordingRobot:
-    """Minimal robot stub that records velocity commands."""
+    """Minimal robot stub that records velocity commands and trajectory goals.
 
-    def __init__(self) -> None:
+    Args:
+        can_walk_to: When False, ``walk_toward`` refuses, which is how a real
+            robot behaves with no usable depth. The follow loop must then fall
+            back to velocity control rather than standing still.
+    """
+
+    def __init__(self, can_walk_to: bool = False) -> None:
         self.commands: list[tuple[float, float, float]] = []
+        self.goals: list[tuple[float, float, float]] = []
+        self._can_walk_to = can_walk_to
 
     def capture_image(self, camera: str = "front"):
         from spot_voice.robot.base import ActionResult
@@ -123,6 +131,14 @@ class RecordingRobot:
 
     def drive(self, v_x: float, v_y: float, v_rot: float) -> None:
         self.commands.append((v_x, v_y, v_rot))
+
+    def walk_toward(
+        self, bearing_deg: float, distance_m: float, standoff_m: float
+    ) -> bool:
+        if not self._can_walk_to:
+            return False
+        self.goals.append((bearing_deg, distance_m, standoff_m))
+        return True
 
 
 class AlwaysSeesSomeone:
@@ -398,3 +414,91 @@ def test_the_errors_the_telemetry_reports_are_the_ones_the_controller_used():
     assert error_x > YAW_DEADBAND
     # The logged error is exactly what produced the logged command.
     assert abs(velocity.v_rot - (-KP_YAW * error_x)) < 1e-6
+
+
+# ----------------------------------------------------------------------
+# Trajectory following
+#
+# The velocity controller aims straight at the person, so an obstacle between
+# the two is a standoff rather than something to walk around, and every
+# acceleration is one this module chose. Handing Spot a goal pose instead moves
+# all of that to Spot's own planner -- which is also what Boston Dynamics' own
+# follow examples do.
+
+
+def test_following_hands_spot_a_goal_rather_than_steering_it():
+    robot = RecordingRobot(can_walk_to=True)
+    controller = FollowController(robot, lambda: AlwaysSeesSomeone())
+
+    controller.start()
+    time.sleep(0.5)
+    controller.stop()
+
+    assert robot.goals, "no trajectory goal was issued"
+    # Velocity control must not be running underneath it -- only the zero
+    # command that stop() sends to settle the robot.
+    assert all(command == (0.0, 0.0, 0.0) for command in robot.commands)
+
+
+def test_a_robot_that_cannot_reach_a_goal_still_gets_followed():
+    """No depth reading must degrade to the old behaviour, not to standing still."""
+    robot = RecordingRobot(can_walk_to=False)
+    controller = FollowController(robot, lambda: AlwaysSeesSomeone())
+
+    controller.start()
+    time.sleep(0.5)
+    controller.stop()
+
+    assert not robot.goals
+    assert any(command != (0.0, 0.0, 0.0) for command in robot.commands)
+
+
+def test_the_goal_is_short_of_the_person_not_on_top_of_them():
+    from spot_voice.robot.follow import FOLLOW_STANDOFF_M
+
+    robot = RecordingRobot(can_walk_to=True)
+    controller = FollowController(robot, lambda: AlwaysSeesSomeone())
+
+    controller.start()
+    time.sleep(0.4)
+    controller.stop()
+
+    _bearing, distance, standoff = robot.goals[0]
+    assert standoff == FOLLOW_STANDOFF_M
+    # AlwaysSeesSomeone stands at 0.3 of frame height against a 0.55 target,
+    # so they are further away than the standoff and it should close in.
+    assert distance > standoff
+
+
+def test_apparent_size_maps_to_distance_the_way_a_camera_does():
+    from spot_voice.robot.follow import FOLLOW_STANDOFF_M, estimate_distance
+
+    at_target = estimate_distance(_box_at(320, TARGET_BBOX_HEIGHT_FRACTION), FRAME)
+    half_as_tall = estimate_distance(_box_at(320, TARGET_BBOX_HEIGHT_FRACTION / 2), FRAME)
+
+    # Standing at the standoff is what the target fraction means.
+    assert abs(at_target - FOLLOW_STANDOFF_M) < 0.05
+    # Half the apparent height is twice the distance.
+    assert abs(half_as_tall - 2 * FOLLOW_STANDOFF_M) < 0.1
+
+
+def test_a_zero_height_box_yields_no_distance_rather_than_infinity():
+    from spot_voice.robot.follow import estimate_distance
+
+    assert estimate_distance((300, 200, 340, 200, 0.9), FRAME) is None
+
+
+def test_bearing_is_positive_to_the_left_matching_the_depth_sensor():
+    from spot_voice.robot.follow import bearing_to
+
+    left = bearing_to(_box_at(FRAME[0] * 0.25, 0.4), FRAME)
+    right = bearing_to(_box_at(FRAME[0] * 0.75, 0.4), FRAME)
+    centre = bearing_to(_box_at(FRAME[0] / 2, 0.4), FRAME)
+
+    assert left > 0, "a person on the left must be a positive bearing"
+    assert right < 0
+    # Tolerances are in degrees, and _box_at truncates to whole pixels, so a
+    # "centred" box actually sits half a pixel off centre. That is 0.08 of a
+    # degree -- far below anything the robot could act on.
+    assert abs(centre) < 0.2
+    assert abs(abs(left) - abs(right)) < 0.2

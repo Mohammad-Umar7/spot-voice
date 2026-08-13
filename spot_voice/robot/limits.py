@@ -32,6 +32,19 @@ VELOCITY_CMD_DURATION = 0.6
 #: ``VELOCITY_CMD_DURATION`` so commands overlap rather than gap.
 VELOCITY_CMD_PERIOD = 0.25
 
+#: How far into the future a trajectory goal is valid, in seconds.
+#:
+#: Longer than ``VELOCITY_CMD_DURATION`` because a goal pose needs time to be
+#: planned and driven, and cutting it short makes Spot decelerate every cycle --
+#: which defeats the entire point of using trajectories for smoothness.
+#:
+#: It is still a dead-man's switch, just a looser one, and the honest way to read
+#: it is as a distance: at ``MAX_VX`` a lapsed goal carries the robot at most
+#: ``1.5 * 0.6`` = 0.9 m before it stops itself, with obstacle avoidance active
+#: throughout. A following loop re-issues at roughly 8 Hz, so in normal operation
+#: a goal is replaced about twelve times before it could ever expire.
+TRAJECTORY_CMD_DURATION = 1.5
+
 #: Sanity bounds on a single ``move`` tool call, so a mis-heard "twenty metres"
 #: cannot turn into a two-minute walk.
 MAX_MOVE_DISTANCE_M = 5.0

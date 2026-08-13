@@ -28,7 +28,15 @@ from .errors import (
 )
 from .estop import SoftwareEstop
 from .graphnav import GraphNav
-from .limits import VELOCITY_CMD_DURATION, VELOCITY_CMD_PERIOD, clamp_velocity
+from .limits import (
+    MAX_VROT,
+    MAX_VX,
+    MAX_VY,
+    TRAJECTORY_CMD_DURATION,
+    VELOCITY_CMD_DURATION,
+    VELOCITY_CMD_PERIOD,
+    clamp_velocity,
+)
 from .motion import plan_move
 
 LOGGER = logging.getLogger(__name__)
@@ -469,6 +477,103 @@ class SpotClient(RobotInterface):
         self._command_client.robot_command(
             command, end_time_secs=time.time() + VELOCITY_CMD_DURATION
         )
+
+    def _speed_capped_params(self):
+        """Mobility params that cap speed and change **nothing** else.
+
+        This is the only place in the project that builds a params object, and
+        it exists for a safety reason rather than a convenience one. A velocity
+        command carries its own speed, so the caps are applied by clamping it. A
+        *trajectory* command does not: Spot picks its own speed to reach the
+        goal, and Spot's default is faster than ``MAX_VX``. Issuing a trajectory
+        with default params would therefore quietly break the velocity ceiling.
+
+        So the ceiling is handed to the planner instead. Every other field --
+        obstacle avoidance above all -- is left untouched at factory defaults,
+        and ``tests/test_safety_invariants.py`` reads this source to prove it.
+        """
+        from bosdyn.api import geometry_pb2
+        from bosdyn.client.robot_command import RobotCommandBuilder
+
+        # Start from the SDK's own defaults and set exactly one field on them.
+        # Building the message from scratch would mean choosing a value for
+        # every safety setting; this way they keep whatever Boston Dynamics
+        # ships, including obstacle avoidance, and only the ceiling is ours.
+        params = RobotCommandBuilder.mobility_params()
+        params.vel_limit.CopyFrom(
+            geometry_pb2.SE2VelocityLimit(
+                max_vel=geometry_pb2.SE2Velocity(
+                    linear=geometry_pb2.Vec2(x=MAX_VX, y=MAX_VY), angular=MAX_VROT
+                ),
+                min_vel=geometry_pb2.SE2Velocity(
+                    linear=geometry_pb2.Vec2(x=-MAX_VX, y=-MAX_VY), angular=-MAX_VROT
+                ),
+            )
+        )
+        return params
+
+    def walk_toward(
+        self, bearing_deg: float, distance_m: float, standoff_m: float
+    ) -> bool:
+        """Send Spot to a goal ``standoff_m`` short of a target, facing it.
+
+        The goal is expressed in the **odometry** frame rather than the vision
+        frame. Vision corrects long-run drift by re-localising against visual
+        features, which is right for a map but wrong here: a re-localisation
+        jump would move the goal under the robot's feet and show up as a lurch.
+        Odometry drifts slowly and never jumps, and drift cannot accumulate
+        anyway because this goal is recomputed from a fresh sensor reading
+        several times a second.
+        """
+        import math
+
+        from bosdyn.client.frame_helpers import (
+            BODY_FRAME_NAME,
+            ODOM_FRAME_NAME,
+            get_se2_a_tform_b,
+        )
+        from bosdyn.client.math_helpers import SE2Pose
+        from bosdyn.client.robot_command import RobotCommandBuilder
+
+        # Stop short of the person rather than at them. Never negative: if they
+        # are already closer than the standoff, the goal is where we stand, and
+        # the command becomes "turn to face them" rather than "back away".
+        reach = max(0.0, distance_m - standoff_m)
+        bearing = math.radians(bearing_deg)
+        goal_in_body = SE2Pose(
+            x=reach * math.cos(bearing),
+            y=reach * math.sin(bearing),
+            angle=bearing,  # arrive already looking at them
+        )
+
+        try:
+            state = self._call("state", self._state_client.get_robot_state)
+            odom_from_body = get_se2_a_tform_b(
+                state.kinematic_state.transforms_snapshot,
+                ODOM_FRAME_NAME,
+                BODY_FRAME_NAME,
+            )
+            if odom_from_body is None:
+                LOGGER.debug("No odom->body transform; falling back to velocity")
+                return False
+            goal = odom_from_body * goal_in_body
+
+            self._command_client.robot_command(
+                RobotCommandBuilder.synchro_se2_trajectory_point_command(
+                    goal_x=goal.x,
+                    goal_y=goal.y,
+                    goal_heading=goal.angle,
+                    frame_name=ODOM_FRAME_NAME,
+                    params=self._speed_capped_params(),
+                ),
+                end_time_secs=time.time() + TRAJECTORY_CMD_DURATION,
+            )
+        except Exception:
+            # Never fatal: the caller falls back to velocity control, which
+            # needs no depth reading and no transform snapshot.
+            LOGGER.debug("Trajectory goal failed; falling back to velocity", exc_info=True)
+            return False
+        return True
 
     def move(
         self,

@@ -116,6 +116,29 @@ class RobotInterface(abc.ABC):
         is the dead-man's switch.
         """
 
+    def walk_toward(
+        self, bearing_deg: float, distance_m: float, standoff_m: float
+    ) -> bool:
+        """Head for a point ``standoff_m`` short of a target, and face it.
+
+        This is the smooth alternative to :meth:`drive`. Rather than deciding a
+        velocity here and re-deciding it every cycle, it hands Spot a goal pose
+        and lets Spot's own planner drive there -- which is what produces the
+        acceleration profile, the cornering, and the routing around obstacles.
+        It is also the pattern Boston Dynamics' own follow examples use.
+
+        Bearing is degrees from straight ahead, positive to the robot's left,
+        matching :meth:`measure_distance`.
+
+        Returns:
+            ``True`` if a goal was issued. ``False`` means this robot cannot do
+            it right now -- typically no depth reading, so no idea how far away
+            the target is -- and the caller should fall back to :meth:`drive`.
+            Callers must re-issue faster than the goal expires; that expiry is
+            the dead-man's switch, exactly as for :meth:`drive`.
+        """
+        return False
+
     @abc.abstractmethod
     def move(
         self,

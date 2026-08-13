@@ -75,6 +75,8 @@ class MockSpot(RobotInterface):
         self._location = "dock" if self._docked else "unknown"
         self._last_drive: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._last_drive_at = 0.0
+        self._last_goal: tuple[float, float, float] | None = None
+        self._last_goal_at = 0.0
         self._started = time.monotonic()
         self._waypoints = DEFAULT_MOCK_WAYPOINTS[:]
 
@@ -201,6 +203,29 @@ class MockSpot(RobotInterface):
         # does not flood the console.
         if any(abs(component) > 0.01 for component in velocity.as_tuple()):
             self._drain_battery(0.002)
+
+    def walk_toward(
+        self, bearing_deg: float, distance_m: float, standoff_m: float
+    ) -> bool:
+        """Record the goal a real Spot would be sent to.
+
+        Returns ``False`` when there is no usable distance, mirroring the real
+        client's "no depth reading, fall back to velocity" path -- otherwise the
+        fallback would only ever be exercised on the robot.
+        """
+        if distance_m is None or distance_m <= 0.0:
+            return False
+        with self._lock:
+            self._last_goal = (bearing_deg, distance_m, standoff_m)
+            self._last_goal_at = time.monotonic()
+        self._drain_battery(0.002)
+        return True
+
+    @property
+    def last_goal(self) -> tuple[float, float, float] | None:
+        """The last ``(bearing_deg, distance_m, standoff_m)`` goal issued."""
+        with self._lock:
+            return self._last_goal
 
     def move(
         self,

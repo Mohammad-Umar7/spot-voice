@@ -73,12 +73,8 @@ def test_no_other_perception_safety_is_traded_away(field):
     assert not offenders, f"{field} referenced at: {offenders}"
 
 
-def test_mobility_params_are_never_customised():
-    """We only ever issue commands with the SDK's default mobility params.
-
-    Passing a params object is how every one of the settings above gets changed,
-    so not constructing one at all is the simplest guarantee.
-    """
+def test_mobility_params_are_never_constructed_directly():
+    """Building the protobuf by hand would bypass every check below it."""
     offenders = [
         f"{path.relative_to(PACKAGE)}:{number}"
         for path in source_files()
@@ -86,6 +82,103 @@ def test_mobility_params_are_never_customised():
         if "MobilityParams(" in line
     ]
     assert not offenders, f"MobilityParams constructed at: {offenders}"
+
+
+def test_mobility_params_are_built_in_exactly_one_place():
+    """Params may be built once, for speed capping, and nowhere else.
+
+    This rule used to be "never build params at all", which was simpler and was
+    true while every command was a velocity command -- those carry their own
+    speed, so clamping the velocity enforced the caps.
+
+    A trajectory command does not carry a speed. Spot chooses its own to reach
+    the goal, and its default is faster than MAX_VX, so a trajectory issued with
+    default params would silently exceed the velocity ceiling. The ceiling has
+    to be handed to the planner, and that means a params object.
+
+    So the guarantee moves rather than weakens: exactly one construction site,
+    which the next test pins to speed limits only.
+    """
+    sites = [
+        f"{path.relative_to(PACKAGE)}:{number}"
+        for path in source_files()
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if "mobility_params(" in line and not line.lstrip().startswith(("#", '"', "'"))
+    ]
+    assert len(sites) == 1, f"expected one mobility_params call site, found: {sites}"
+    assert sites[0].startswith("robot\\spot_client.py") or sites[0].startswith(
+        "robot/spot_client.py"
+    ), f"mobility params built outside the robot layer: {sites[0]}"
+
+
+def test_the_only_mobility_params_set_speed_and_nothing_else():
+    """Defaults come from the SDK; we override exactly one field.
+
+    Every setting that trades away a safety behaviour is a field on this same
+    message, so the thing to pin is which fields the code touches at all. The
+    builder must be called with no arguments -- so obstacle avoidance, stair
+    handling and the rest keep whatever Boston Dynamics ships -- and ``vel_limit``
+    must be the only field written afterwards.
+    """
+    import ast
+    import inspect
+
+    from spot_voice.robot.spot_client import SpotClient
+
+    tree = ast.parse(inspect.getsource(SpotClient._speed_capped_params).strip())
+
+    builder_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "mobility_params"
+    ]
+    assert len(builder_calls) == 1
+    assert not builder_calls[0].args and not builder_calls[0].keywords, (
+        "mobility_params must be called with no arguments, so every safety "
+        "setting keeps its SDK default"
+    )
+
+    # Any field written on the params object, however it is written.
+    touched = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "params"
+    }
+    assert touched == {"vel_limit"}, f"params fields touched: {sorted(touched)}"
+
+
+def test_the_speed_cap_handed_to_the_planner_is_the_hard_cap():
+    """A trajectory must not be allowed to outrun the velocity ceiling.
+
+    Reads the numbers actually placed in the limit rather than trusting that the
+    constants were referenced, because referencing MAX_VX and then halving it --
+    or doubling it -- would pass any check that only looked for the name.
+    """
+    pytest.importorskip("bosdyn.api")
+    from spot_voice.robot.limits import MAX_VROT, MAX_VX, MAX_VY
+    from spot_voice.robot.spot_client import SpotClient
+
+    params = SpotClient._speed_capped_params(object.__new__(SpotClient))
+    fastest = params.vel_limit.max_vel
+    slowest = params.vel_limit.min_vel
+
+    assert fastest.linear.x == MAX_VX and slowest.linear.x == -MAX_VX
+    assert fastest.linear.y == MAX_VY and slowest.linear.y == -MAX_VY
+    assert fastest.angular == MAX_VROT and slowest.angular == -MAX_VROT
+
+
+def test_a_lapsed_trajectory_goal_cannot_carry_the_robot_far():
+    """The trajectory dead-man is looser than the velocity one; bound it anyway.
+
+    A goal outlives a velocity command because a planner needs room to work, so
+    the guarantee is stated as a distance rather than a time: if this process
+    dies mid-follow, the robot coasts less than a metre before stopping.
+    """
+    from spot_voice.robot.limits import MAX_VX, TRAJECTORY_CMD_DURATION
+
+    assert TRAJECTORY_CMD_DURATION * MAX_VX < 1.0
 
 
 def test_estop_release_is_never_reachable_from_a_tool():

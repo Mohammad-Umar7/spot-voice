@@ -3,13 +3,27 @@
 Shape of the loop, 5-10 Hz:
 
     front camera frame -> person detection -> pick the best candidate
-      -> P-control (yaw from horizontal offset, forward speed from apparent size)
-      -> capped velocity command with the 0.6 s dead-man expiry
+      -> bearing and rough distance -> goal pose a standoff short of them
+      -> trajectory command, re-issued every cycle
 
-Claude only ever starts and stops this; it never steers. Spot's own obstacle
+**Spot's own planner does the driving.** This module decides *where* to go, not
+*how* to get there: it hands over a goal pose and Spot chooses the acceleration,
+rounds the corner, and routes around whatever is in the way. That last part is
+the reason it matters. The controller this replaced steered by velocity aimed
+straight at the person, so an obstacle between the two was a standoff rather
+than something to walk around -- and while Spot's avoidance correctly refused to
+walk into it, nothing was capable of going round. It is also the pattern Boston
+Dynamics' own follow examples use.
+
+Velocity control is still here as the fallback, for when a goal cannot be issued
+-- no distance estimate, or a robot that does not support it. It is worse, so
+the telemetry counts how often it happens.
+
+Claude only ever starts and stops this; it never steers. Spot's obstacle
 avoidance stays on at factory defaults and is the safety net -- this controller
-deliberately never touches obstacle padding, and every velocity it produces goes
-through :func:`~spot_voice.robot.limits.clamp_velocity`.
+deliberately never touches obstacle padding, every velocity it produces goes
+through :func:`~spot_voice.robot.limits.clamp_velocity`, and the speed ceiling
+handed to the planner is the same hard cap.
 """
 
 from __future__ import annotations
@@ -21,6 +35,7 @@ from dataclasses import dataclass
 from typing import Callable, Protocol, Sequence
 
 from ..vision.identity import IdentityTracker, LockState
+from ..vision.pointing import CAMERA_HFOV_DEG as POINTING_HFOV_DEG
 from .base import RobotInterface
 from .limits import MAX_VROT, MAX_VX, clamp_velocity
 
@@ -35,7 +50,17 @@ LOOP_HZ = 8.0
 #: 1.5 m in front of Spot, run follow-me, and read the logged ``bbox_frac``.
 TARGET_BBOX_HEIGHT_FRACTION = 0.55
 
-#: Proportional gains.
+#: How far behind the person Spot aims to sit, in metres. The goal pose is this
+#: much short of them, so it walks *to a place near them* rather than *at them*.
+FOLLOW_STANDOFF_M = 1.5
+
+#: Horizontal field of view of the front cameras, in degrees. Shared with the
+#: pointing code so a bearing means the same thing everywhere.
+CAMERA_HFOV_DEG = POINTING_HFOV_DEG
+
+#: Proportional gains. Only used on the velocity fallback -- when a trajectory
+#: goal can be issued, Spot's own planner chooses the speeds and these do not
+#: apply.
 KP_YAW = 1.1  # rad/s per unit of normalised horizontal error
 KP_FORWARD = 0.9  # m/s per unit of normalised size error
 
@@ -267,6 +292,46 @@ def tracking_errors(
     return error_x, box_fraction, error_size
 
 
+def estimate_distance(
+    box: tuple[int, int, int, int, float],
+    frame_size: tuple[int, int],
+    target_fraction: float = TARGET_BBOX_HEIGHT_FRACTION,
+    standoff_m: float = FOLLOW_STANDOFF_M,
+) -> float | None:
+    """Rough metres to the person, from how tall they look.
+
+    Apparent size is inversely proportional to distance, and
+    ``TARGET_BBOX_HEIGHT_FRACTION`` already means "this tall at the standoff".
+    So the standoff doubles as the scale: half as tall means twice as far.
+
+    Deliberately not a depth-camera read. Depth would be more accurate, but it
+    is another image fetch over wifi inside a 125 ms budget that already
+    contains one, and a distance that arrives late is worse than one that is
+    approximately right on time. The consequence of the scale being off is that
+    Spot holds the wrong standoff -- the same error the old controller had, and
+    fixed by the same calibration -- while the *bearing*, which is what actually
+    drives the turning, stays exact either way.
+
+    Returns ``None`` when the box has no height to measure.
+    """
+    _error_x, box_fraction, _error_size = tracking_errors(
+        box, frame_size, target_fraction
+    )
+    if box_fraction <= 0.0:
+        return None
+    return standoff_m * (target_fraction / box_fraction)
+
+
+def bearing_to(
+    box: tuple[int, int, int, int, float],
+    frame_size: tuple[int, int],
+    hfov_deg: float = CAMERA_HFOV_DEG,
+) -> float:
+    """Degrees from straight ahead to the person, positive to Spot's left."""
+    error_x, _box_fraction, _error_size = tracking_errors(box, frame_size)
+    return -error_x * (hfov_deg / 2.0)
+
+
 def compute_velocity(
     box: tuple[int, int, int, int, float],
     frame_size: tuple[int, int],
@@ -325,9 +390,19 @@ class _Telemetry:
     error_x: float = 0.0
     v_x: float = 0.0
     v_rot: float = 0.0
+    fallbacks: int = 0
 
     def __post_init__(self) -> None:
         self.last_log = self.started
+
+    def note_fallback(self) -> None:
+        """Note that this tick was driven by velocity, not a trajectory goal.
+
+        Worth counting rather than assuming: a follow that has quietly reverted
+        to velocity control looks identical from outside except for being worse,
+        and the fallback is meant to be rare.
+        """
+        self.fallbacks += 1
 
     def record(self, error_x, box_fraction, _error_size, velocity) -> None:
         """Note the controller's inputs and its output for this tick."""
@@ -350,7 +425,8 @@ class _Telemetry:
         if self.frac_count:
             LOGGER.info(
                 "follow %.1f Hz of %.0f (worst cycle %.0f ms) "
-                "bbox_frac=%.2f target=%.2f error_x=%+.2f v_x=%.2f v_rot=%+.2f",
+                "bbox_frac=%.2f target=%.2f error_x=%+.2f v_x=%.2f v_rot=%+.2f "
+                "velocity_fallbacks=%d/%d",
                 rate,
                 LOOP_HZ,
                 self.worst_cycle * 1000.0,
@@ -359,6 +435,8 @@ class _Telemetry:
                 self.error_x,
                 self.v_x,
                 self.v_rot,
+                self.fallbacks,
+                self.frac_count,
             )
         else:
             LOGGER.info(
@@ -372,6 +450,7 @@ class _Telemetry:
         self.worst_cycle = 0.0
         self.frac_sum = 0.0
         self.frac_count = 0
+        self.fallbacks = 0
 
 
 class FollowController:
@@ -487,6 +566,30 @@ class FollowController:
             LOGGER.warning("Face recognition unavailable (%s)", exc, exc_info=True)
             return None, None
 
+    def _steer(
+        self,
+        target: tuple[int, int, int, int, float],
+        frame_size: tuple[int, int],
+    ) -> bool:
+        """Ask Spot to walk to a spot near the person. False if it could not.
+
+        Preferred over driving by velocity because Spot's planner then owns the
+        motion: it picks the acceleration, rounds the corners, and routes around
+        obstacles on the way. Velocity control can do none of those -- it aims
+        straight at the person, so an obstacle between the two is a standoff
+        rather than something to walk around.
+        """
+        distance = estimate_distance(target, frame_size)
+        if distance is None:
+            return False
+        try:
+            return self._robot.walk_toward(
+                bearing_to(target, frame_size), distance, FOLLOW_STANDOFF_M
+            )
+        except Exception:
+            LOGGER.debug("walk_toward failed; using velocity", exc_info=True)
+            return False
+
     def _run(self) -> None:
         try:
             detector = self._detector_factory()
@@ -568,7 +671,10 @@ class FollowController:
                     telemetry.record(
                         *tracking_errors(target, detector.frame_size), velocity
                     )
-                    self._robot.drive(*velocity.as_tuple())
+                    if not self._steer(target, detector.frame_size):
+                        # No goal could be issued -- drive it by hand instead.
+                        self._robot.drive(*velocity.as_tuple())
+                        telemetry.note_fallback()
             except Exception:
                 LOGGER.warning("Follow-me iteration failed", exc_info=True)
                 try:
