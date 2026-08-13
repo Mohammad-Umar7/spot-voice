@@ -13,6 +13,7 @@ from spot_voice.robot.follow import (
     compute_velocity,
     pick_target,
 )
+import spot_voice.robot.follow as follow_module
 from spot_voice.robot.limits import MAX_VROT, MAX_VX
 
 FRAME = (640, 480)
@@ -426,7 +427,8 @@ def test_the_errors_the_telemetry_reports_are_the_ones_the_controller_used():
 # follow examples do.
 
 
-def test_following_hands_spot_a_goal_rather_than_steering_it():
+def test_following_hands_spot_a_goal_rather_than_steering_it(monkeypatch):
+    monkeypatch.setattr(follow_module, "TRAJECTORY_FOLLOW_ENABLED", True)
     robot = RecordingRobot(can_walk_to=True)
     controller = FollowController(robot, lambda: AlwaysSeesSomeone())
 
@@ -453,7 +455,8 @@ def test_a_robot_that_cannot_reach_a_goal_still_gets_followed():
     assert any(command != (0.0, 0.0, 0.0) for command in robot.commands)
 
 
-def test_the_goal_is_short_of_the_person_not_on_top_of_them():
+def test_the_goal_is_short_of_the_person_not_on_top_of_them(monkeypatch):
+    monkeypatch.setattr(follow_module, "TRAJECTORY_FOLLOW_ENABLED", True)
     from spot_voice.robot.follow import FOLLOW_STANDOFF_M
 
     robot = RecordingRobot(can_walk_to=True)
@@ -502,3 +505,26 @@ def test_bearing_is_positive_to_the_left_matching_the_depth_sensor():
     # degree -- far below anything the robot could act on.
     assert abs(centre) < 0.2
     assert abs(abs(left) - abs(right)) < 0.2
+
+
+def test_trajectory_following_is_off_until_the_camera_geometry_is_trusted():
+    """A skewed bearing is survivable closed-loop and dangerous open-loop.
+
+    Velocity control only ever acts to reduce the offset it can see, so a
+    mis-referenced camera made it inefficient. A trajectory goal commits: the
+    same skew becomes a confident goal pose metres away. On the first real run
+    that walked the robot at a glass wall.
+    """
+    assert follow_module.TRAJECTORY_FOLLOW_ENABLED is False
+
+
+def test_following_falls_back_to_velocity_while_trajectories_are_off():
+    robot = RecordingRobot(can_walk_to=True)
+    controller = FollowController(robot, lambda: AlwaysSeesSomeone())
+
+    controller.start()
+    time.sleep(0.5)
+    controller.stop()
+
+    assert not robot.goals, "no trajectory goal may be issued while disabled"
+    assert any(command != (0.0, 0.0, 0.0) for command in robot.commands)

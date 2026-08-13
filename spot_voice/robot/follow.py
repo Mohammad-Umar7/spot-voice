@@ -58,6 +58,29 @@ FOLLOW_STANDOFF_M = 1.5
 #: pointing code so a bearing means the same thing everywhere.
 CAMERA_HFOV_DEG = POINTING_HFOV_DEG
 
+#: OFF until the camera geometry is trustworthy. Do not re-enable without
+#: reading this.
+#:
+#: Turning a pixel offset into an absolute bearing currently assumes the frame
+#: is centred on straight-ahead and that pixel offset maps linearly across
+#: CAMERA_HFOV_DEG. Both are false. "front" is ``frontleft_fisheye_image``, a
+#: camera mounted on the front-left corner and angled outward, so its centre is
+#: not the robot's centre line. And the frame is rotated -78 degrees onto an
+#: expanded canvas before detection, so its horizontal axis is a diagonal across
+#: the real sensor and its width includes rotation padding.
+#:
+#: Velocity control survived both because it is closed-loop: it only ever acts
+#: to reduce the offset it can see, so a skewed frame made it inefficient rather
+#: than wrong. A trajectory goal is open-loop within each command -- a skewed
+#: bearing becomes a confident goal pose metres away, and Spot walks decisively
+#: to the wrong place. On the first real run it walked at a glass wall.
+#:
+#: The fix is to stop guessing: the SDK exposes pixel_to_camera_space plus the
+#: sensor-to-body transform in every image response, which gives a true bearing
+#: with no HFOV constant and no assumption about where the camera points. Until
+#: that is in and checked on the robot, following stays on velocity control.
+TRAJECTORY_FOLLOW_ENABLED = False
+
 #: Proportional gains. Only used on the velocity fallback -- when a trajectory
 #: goal can be issued, Spot's own planner chooses the speeds and these do not
 #: apply.
@@ -618,6 +641,8 @@ class FollowController:
         straight at the person, so an obstacle between the two is a standoff
         rather than something to walk around.
         """
+        if not TRAJECTORY_FOLLOW_ENABLED:
+            return False
         distance = estimate_distance(target, frame_size)
         if distance is None:
             return False
